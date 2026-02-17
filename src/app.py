@@ -8,10 +8,42 @@ import streamlit as st
 import os
 import sys
 import time
+import hashlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import COLORS
+
+# Password protection - set your password here or use Streamlit secrets
+# Default password: dplus2024 (change this for production!)
+APP_PASSWORD_HASH = "b460353cbe83531c71188863da2834c2bd42c628"
+
+
+def check_password():
+    """Returns True if the user had the correct password."""
+
+    def password_entered():
+        """Checks whether a password entered by the user is correct."""
+        if hashlib.sha1(st.session_state["password"].encode()).hexdigest() == APP_PASSWORD_HASH:
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]
+        else:
+            st.session_state["password_correct"] = False
+
+    if "password_correct" not in st.session_state:
+        # First run, show input
+        st.text_input("Password", type="password", on_change=password_entered, key="password")
+        return False
+    elif not st.session_state["password_correct"]:
+        # Wrong password, show input again
+        st.text_input("Password", type="password", on_change=password_entered, key="password")
+        st.error("Incorrect password")
+        return False
+    else:
+        # Password correct
+        return True
+
+
 from data.database import (
     build_database,
     refresh_database,
@@ -541,6 +573,16 @@ def render_period_info(filters: dict):
 def main():
     """Main application."""
     setup_page()
+
+    # Password protection
+    if not check_password():
+        st.markdown(f"""
+        <div style="text-align: center; padding: 3rem;">
+            <h1 style="color: {COLORS['Primary']};">🔒 D Plus Skin Analytics</h1>
+            <p style="color: {COLORS['TextLight']};">Enter password to access the dashboard</p>
+        </div>
+        """, unsafe_allow_html=True)
+        st.stop()
 
     # Initialize session state for refresh
     if 'last_refresh' not in st.session_state:

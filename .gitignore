@@ -50,6 +50,9 @@ Thumbs.db
 
 # Sales data - NEVER commit
 Original files/
-*.xlsx
-*.csv
 dplus_cache.db
+
+# Allow data folder for cloud deployment (password protected)
+# Put your data files in src/data/uploaded/ folder to include in repo
+# !src/data/uploaded/*.xlsx
+# !src/data/uploaded/*.csv

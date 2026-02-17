@@ -132,7 +132,12 @@ PRODUCT_REVENUE_TOP_PERCENTILE = 0.67
 import os
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Local data directory (not in git)
 DATA_DIR = os.path.join(PROJECT_ROOT, 'Original files')
+
+# Cloud data directory (included in git for Streamlit Cloud)
+CLOUD_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'uploaded')
 
 TIKTOK_PATTERN = 'ทั้งหมด คำสั่งซื้อ-*.csv'
 SHOPEE_PATTERN = 'Order.all.*.xlsx'

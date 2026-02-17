@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import (
     DATA_DIR,
+    CLOUD_DATA_DIR,
     TIKTOK_PATTERN,
     SHOPEE_PATTERN,
     BLACKLIST_KEYWORDS
@@ -303,9 +304,17 @@ def build_database(show_progress=True) -> bool:
         # Get already loaded files
         loaded_files = get_loaded_files()
 
-        # Get all files
+        # Get all files from both local and cloud directories
         tiktok_files = sorted(glob.glob(os.path.join(DATA_DIR, TIKTOK_PATTERN)))
         shopee_files = sorted(glob.glob(os.path.join(DATA_DIR, SHOPEE_PATTERN)))
+
+        # Also check cloud data directory
+        if os.path.exists(CLOUD_DATA_DIR):
+            tiktok_files.extend(sorted(glob.glob(os.path.join(CLOUD_DATA_DIR, TIKTOK_PATTERN))))
+            shopee_files.extend(sorted(glob.glob(os.path.join(CLOUD_DATA_DIR, SHOPEE_PATTERN))))
+            # Also check for any xlsx/csv files in cloud dir
+            tiktok_files.extend(sorted(glob.glob(os.path.join(CLOUD_DATA_DIR, '*.csv'))))
+            shopee_files.extend(sorted(glob.glob(os.path.join(CLOUD_DATA_DIR, '*.xlsx'))))
 
         # Filter to only new/modified files
         new_tiktok = []
