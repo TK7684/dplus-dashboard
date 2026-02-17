@@ -1,530 +1,216 @@
 """
-SQLite database module for DPLUS Dashboard.
-Provides fast querying for large datasets.
-Supports incremental updates with order_id as unique key.
+DuckDB direct query module for DPLUS Dashboard.
+Queries CSV/XLSX files directly - no database loading required.
+This is the fastest approach for large datasets.
 """
 
-import sqlite3
 import os
+import glob
+import duckdb
 import pandas as pd
 import streamlit as st
-from typing import Optional, Tuple, Set
-from datetime import date, datetime
-import glob
-from contextlib import contextmanager
-import sys
-import tempfile
+from typing import Optional, Tuple
+from datetime import date
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Configuration
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import (
-    DATA_DIR,
-    CLOUD_DATA_DIR,
-    ALT_DATA_DIR,
-    TIKTOK_PATTERN,
-    SHOPEE_PATTERN,
-    BLACKLIST_KEYWORDS
-)
-from utils.logger import get_logger, log_error, log_info, log_data_load
+# Data directories to check
+DATA_DIRS = [
+    os.path.join(PROJECT_ROOT, 'data'),
+    os.path.join(PROJECT_ROOT, 'Original files'),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploaded'),
+]
 
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'dplus_cache.db')
+# Blacklist keywords (case-insensitive)
+BLACKLIST_KEYWORDS = [
+    'apple', 'iphone', 'ipad', 'macbook', 'airpods', 'apple watch',
+    'samsung', 'galaxy', 'case', 'charger', 'cable', 'headphone',
+    'earphone', 'earbuds', 'electronics', 'accessories', 'adapter',
+    'tempered glass', 'screen protector', 'phone cover', 'phone case',
+    'wireless charger', 'power bank', 'usb', 'lightning', 'type-c'
+]
 
-# Logger instance
-_logger = None
-
-
-def _get_logger():
-    """Lazy-load logger to avoid circular imports."""
-    global _logger
-    if _logger is None:
-        _logger = get_logger()
-    return _logger
+# Cache for file discovery
+_files_cache = None
+_conn_cache = None
 
 
-@contextmanager
-def get_connection():
-    """Get SQLite connection with context manager for proper cleanup."""
-    conn = None
-    try:
-        conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
-        conn.row_factory = sqlite3.Row
-        yield conn
-    except sqlite3.Error as e:
-        if conn:
-            conn.rollback()
-        log_error(e, {'operation': 'get_connection'})
-        raise
-    finally:
-        if conn:
-            conn.close()
+def get_data_files() -> dict:
+    """Get all data files organized by type."""
+    global _files_cache
+    if _files_cache is not None:
+        return _files_cache
+
+    tiktok_files = []
+    shopee_files = []
+
+    for data_dir in DATA_DIRS:
+        if os.path.exists(data_dir):
+            tiktok_files.extend(glob.glob(os.path.join(data_dir, '*.csv')))
+            tiktok_files.extend(glob.glob(os.path.join(data_dir, '*.csv.gz')))
+            shopee_files.extend(glob.glob(os.path.join(data_dir, '*.xlsx')))
+
+    _files_cache = {'tiktok': tiktok_files, 'shopee': shopee_files}
+    return _files_cache
 
 
+def build_blacklist_sql() -> str:
+    """Generate SQL for blacklist filtering."""
+    conditions = [f"LOWER(product_name) NOT LIKE '%{kw}%'" for kw in BLACKLIST_KEYWORDS]
+    return " AND ".join(conditions)
+
+
+@st.cache_resource
 def init_database():
-    """Initialize the SQLite database with optimized schema."""
-    try:
-        with get_connection() as conn:
-            cursor = conn.cursor()
+    """Initialize DuckDB with views pointing to data files."""
+    global _conn_cache
+    if _conn_cache is not None:
+        return _conn_cache
 
-            # Create orders table with composite unique key on (order_id, product_name, platform)
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS orders (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    order_id TEXT NOT NULL,
-                    platform TEXT NOT NULL,
-                    product_name TEXT,
-                    quantity INTEGER DEFAULT 0,
-                    subtotal_net REAL DEFAULT 0,
-                    order_total_amount REAL DEFAULT 0,
-                    created_at TEXT,
-                    date TEXT,
-                    seller_sku TEXT,
-                    order_status TEXT,
-                    product_category TEXT,
-                    UNIQUE(order_id, product_name, platform)
-                )
-            ''')
+    conn = duckdb.connect(':memory:')
+    conn.execute("SET threads=4")
+    conn.execute("SET memory_limit='2GB'")
 
-            # Create indexes for fast querying
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_date ON orders(date)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_platform ON orders(platform)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_date_platform ON orders(date, platform)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_product ON orders(product_name)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_order_id ON orders(order_id)')
-            # Additional indexes for performance
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_subtotal ON orders(subtotal_net)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_order_status ON orders(order_status)')
+    # Load TikTok data
+    tiktok_files = get_data_files()['tiktok']
+    if tiktok_files:
+        file_list = ", ".join([f"'{f}'" for f in tiktok_files])
+        blacklist_sql = build_blacklist_sql().replace('product_name', 'TRIM("Product Name")')
 
-            # Create metadata table to track loaded files
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS loaded_files (
-                    filename TEXT PRIMARY KEY,
-                    file_mtime REAL,
-                    rows_loaded INTEGER,
-                    loaded_at TEXT
-                )
-            ''')
+        conn.execute(f"""
+            CREATE OR REPLACE VIEW tiktok_orders AS
+            SELECT
+                TRIM("Order ID")::VARCHAR as order_id,
+                'TikTok' as platform,
+                TRIM("Product Name")::VARCHAR as product_name,
+                TRY_CAST(TRIM("Quantity") AS INTEGER) as quantity,
+                TRY_CAST(TRIM("SKU Subtotal After Discount") AS DOUBLE) as subtotal_net,
+                TRY_CAST(TRIM("Order Amount") AS DOUBLE) as order_total_amount,
+                TRY_CAST(STRPTIME(TRIM("Created Time"), '%d/%m/%Y %H:%M:%S') AS TIMESTAMP) as created_at,
+                TRY_CAST(STRPTIME(SUBSTRING(TRIM("Created Time"), 1, 10), '%d/%m/%Y') AS DATE) as date,
+                COALESCE(TRIM("Seller SKU")::VARCHAR, '') as seller_sku,
+                COALESCE(TRIM("Order Status")::VARCHAR, '') as order_status,
+                COALESCE(TRIM("Product Category")::VARCHAR, '') as product_category
+            FROM read_csv_auto(
+                [{file_list}],
+                header=true,
+                ignore_errors=true,
+                all_varchar=true
+            )
+            WHERE "Order ID" IS NOT NULL AND "Order ID" != ''
+              AND {blacklist_sql}
+        """)
 
-            # Update query planner statistics
-            cursor.execute('ANALYZE')
+    # Load Shopee data via pandas
+    shopee_files = get_data_files()['shopee']
+    if shopee_files:
+        dfs = []
+        for f in shopee_files:
+            try:
+                df = pd.read_excel(f)
+                dfs.append(df)
+            except:
+                pass
 
-            conn.commit()
-            log_info("Database initialized successfully")
-    except Exception as e:
-        log_error(e, {'operation': 'init_database'})
-        raise
+        if dfs:
+            shopee_df = pd.concat(dfs, ignore_index=True)
 
+            column_map = {
+                'หมายเลขคำสั่งซื้อ': 'order_id',
+                'ชื่อสินค้า': 'product_name',
+                'จำนวน': 'quantity',
+                'ราคาขายสุทธิ': 'subtotal_net',
+                'จำนวนเงินทั้งหมด': 'order_total_amount',
+                'วันที่ทำการสั่งซื้อ': 'created_at',
+                'เลขอ้างอิง SKU (SKU Reference No.)': 'seller_sku',
+                'สถานะการสั่งซื้อ': 'order_status'
+            }
+            shopee_df = shopee_df.rename(columns=column_map)
 
-def get_loaded_files() -> Set[str]:
-    """Get set of already loaded files."""
-    try:
-        with get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT filename FROM loaded_files')
-            return {row[0] for row in cursor.fetchall()}
-    except Exception as e:
-        log_error(e, {'operation': 'get_loaded_files'})
-        return set()
+            mask = ~shopee_df['product_name'].fillna('').str.lower().apply(
+                lambda x: any(kw in x for kw in BLACKLIST_KEYWORDS)
+            )
+            shopee_df = shopee_df[mask]
 
+            shopee_df['platform'] = 'Shopee'
+            shopee_df['date'] = pd.to_datetime(shopee_df['created_at'], errors='coerce').dt.date
+            shopee_df['product_category'] = ''
+            shopee_df['quantity'] = pd.to_numeric(shopee_df['quantity'], errors='coerce').fillna(0).clip(lower=0).astype(int)
+            shopee_df['subtotal_net'] = pd.to_numeric(shopee_df['subtotal_net'], errors='coerce').fillna(0).clip(lower=0)
+            shopee_df['order_total_amount'] = pd.to_numeric(shopee_df['order_total_amount'], errors='coerce').fillna(0).clip(lower=0)
 
-def mark_file_loaded(filename: str, mtime: float, rows: int, cursor=None):
-    """Mark a file as loaded. Use provided cursor if available."""
-    try:
-        if cursor:
-            cursor.execute('''
-                INSERT OR REPLACE INTO loaded_files (filename, file_mtime, rows_loaded, loaded_at)
-                VALUES (?, ?, ?, ?)
-            ''', (filename, mtime, rows, datetime.now().isoformat()))
-        else:
-            with get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute('''
-                    INSERT OR REPLACE INTO loaded_files (filename, file_mtime, rows_loaded, loaded_at)
-                    VALUES (?, ?, ?, ?)
-                ''', (filename, mtime, rows, datetime.now().isoformat()))
-                conn.commit()
-        log_data_load(filename, rows, "loaded")
-    except Exception as e:
-        log_error(e, {'operation': 'mark_file_loaded', 'filename': filename})
+            # Register DataFrame as a table in DuckDB
+            conn.register('shopee_df', shopee_df)
+            conn.execute("""
+                CREATE OR REPLACE VIEW shopee_orders AS
+                SELECT order_id, platform, product_name, quantity,
+                       subtotal_net, order_total_amount, created_at, date,
+                       seller_sku, order_status, product_category
+                FROM shopee_df
+            """)
 
+    # Create combined orders view
+    has_tiktok = len(get_data_files()['tiktok']) > 0
+    has_shopee = len(get_data_files()['shopee']) > 0
 
-def parse_tiktok_date(date_str: str) -> Tuple[Optional[str], Optional[str]]:
-    """Parse TikTok date and return (datetime, date)."""
-    if pd.isna(date_str) or date_str == '':
-        return None, None
-    try:
-        dt = pd.to_datetime(date_str, format='%d/%m/%Y %H:%M:%S')
-        return dt.isoformat(), dt.strftime('%Y-%m-%d')
-    except (ValueError, TypeError):
-        try:
-            dt = pd.to_datetime(date_str, dayfirst=True)
-            return dt.isoformat(), dt.strftime('%Y-%m-%d')
-        except (ValueError, TypeError):
-            return None, None
+    if has_tiktok and has_shopee:
+        conn.execute("""
+            CREATE OR REPLACE VIEW orders AS
+            SELECT order_id, platform, product_name, quantity,
+                   subtotal_net, order_total_amount, created_at, date,
+                   seller_sku, order_status, product_category
+            FROM tiktok_orders
+            UNION ALL
+            SELECT order_id, platform, product_name, quantity,
+                   subtotal_net, order_total_amount, created_at, date,
+                   seller_sku, order_status, product_category
+            FROM shopee_orders
+        """)
+    elif has_tiktok:
+        conn.execute("CREATE OR REPLACE VIEW orders AS SELECT * FROM tiktok_orders")
+    elif has_shopee:
+        conn.execute("CREATE OR REPLACE VIEW orders AS SELECT * FROM shopee_orders")
+    else:
+        # Create empty orders table
+        conn.execute("""
+            CREATE OR REPLACE VIEW orders AS
+            SELECT '' as order_id, '' as platform, '' as product_name,
+                   0 as quantity, 0.0 as subtotal_net, 0.0 as order_total_amount,
+                   NULL as created_at, NULL as date, '' as seller_sku,
+                   '' as order_status, '' as product_category
+            WHERE 1=0
+        """)
 
-
-def parse_shopee_date(date_str: str) -> Tuple[Optional[str], Optional[str]]:
-    """Parse Shopee date and return (datetime, date)."""
-    if pd.isna(date_str) or date_str == '':
-        return None, None
-    try:
-        dt = pd.to_datetime(date_str, format='%Y-%m-%d %H:%M')
-        return dt.isoformat(), dt.strftime('%Y-%m-%d')
-    except (ValueError, TypeError):
-        try:
-            dt = pd.to_datetime(date_str)
-            return dt.isoformat(), dt.strftime('%Y-%m-%d')
-        except (ValueError, TypeError):
-            return None, None
-
-
-def is_blacklisted(product_name: str) -> bool:
-    """Check if product is blacklisted."""
-    if pd.isna(product_name):
-        return False
-    product_lower = str(product_name).lower()
-    return any(kw.lower() in product_lower for kw in BLACKLIST_KEYWORDS)
-
-
-def load_tiktok_to_db(filepath: str, cursor) -> int:
-    """Load a TikTok CSV file into database using batch inserts. Supports gzip compression.
-
-    Data cleaning applied:
-    - Excludes blacklisted products (apple, iphone, ipad, etc.)
-    - Validates and cleans numeric fields
-    - Removes rows with invalid dates
-    - Deduplicates by (order_id, product_name, platform)
-    """
-    # Check if file is gzip compressed
-    is_gzipped = filepath.endswith('.gz')
-
-    read_csv_kwargs = {'low_memory': False}
-    if is_gzipped:
-        read_csv_kwargs['compression'] = 'gzip'
-
-    try:
-        df = pd.read_csv(filepath, encoding='utf-8', **read_csv_kwargs)
-    except UnicodeDecodeError:
-        try:
-            df = pd.read_csv(filepath, encoding='utf-8-sig', **read_csv_kwargs)
-        except UnicodeDecodeError:
-            df = pd.read_csv(filepath, encoding='latin-1', **read_csv_kwargs)
-
-    df.columns = df.columns.str.strip()
-
-    # Check required columns
-    product_col = 'Product Name'
-    if product_col not in df.columns or 'Order ID' not in df.columns:
-        return 0
-
-    # Fast blacklist filter using vectorized operations
-    product_lower = df[product_col].fillna('').str.lower()
-    mask = ~product_lower.apply(lambda x: any(kw.lower() in x for kw in BLACKLIST_KEYWORDS))
-    df = df[mask]
-
-    if df.empty:
-        return 0
-
-    # Parse dates - Bangkok timezone (data is already in BKK time)
-    df['created_at_dt'] = pd.to_datetime(df['Created Time'], format='%d/%m/%Y %H:%M:%S', errors='coerce')
-    if df['created_at_dt'].isna().all():
-        df['created_at_dt'] = pd.to_datetime(df['Created Time'], dayfirst=True, errors='coerce')
-
-    df = df[df['created_at_dt'].notna()]
-    if df.empty:
-        return 0
-
-    df['created_at'] = df['created_at_dt'].dt.strftime('%Y-%m-%dT%H:%M:%S')
-    df['date'] = df['created_at_dt'].dt.strftime('%Y-%m-%d')
-
-    # Vectorized data preparation with validation
-    df['order_id'] = df['Order ID'].astype(str).str.strip()
-    df['product_name'] = df['Product Name'].astype(str).str.strip().str[:500]
-
-    # Clean and validate numeric fields - replace negative values with 0
-    df['quantity'] = pd.to_numeric(df['Quantity'], errors='coerce').fillna(0).clip(lower=0).astype(int)
-    df['subtotal_net'] = pd.to_numeric(df['SKU Subtotal After Discount'], errors='coerce').fillna(0).clip(lower=0)
-    df['order_total_amount'] = pd.to_numeric(df['Order Amount'], errors='coerce').fillna(0).clip(lower=0)
-
-    # Handle optional columns safely
-    df['seller_sku'] = df.get('Seller SKU', pd.Series([''] * len(df))).astype(str).str.strip()
-    df['order_status'] = df.get('Order Status', pd.Series([''] * len(df))).astype(str).str.strip()
-    df['product_category'] = df.get('Product Category', pd.Series([''] * len(df))).astype(str).str.strip()
-
-    # Remove rows with empty order_id
-    df = df[df['order_id'] != '']
-    if df.empty:
-        return 0
-
-    # Prepare batch data using list comprehension (faster)
-    batch_data = list(zip(
-        df['order_id'],
-        ['TikTok'] * len(df),
-        df['product_name'],
-        df['quantity'],
-        df['subtotal_net'],
-        df['order_total_amount'],
-        df['created_at'],
-        df['date'],
-        df['seller_sku'],
-        df['order_status'],
-        df['product_category']
-    ))
-
-    # Batch insert with REPLACE to handle duplicates
-    if batch_data:
-        cursor.executemany('''
-            INSERT OR REPLACE INTO orders
-            (order_id, platform, product_name, quantity, subtotal_net,
-             order_total_amount, created_at, date, seller_sku, order_status, product_category)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', batch_data)
-
-    return len(batch_data)
-
-
-def load_shopee_to_db(filepath: str, cursor) -> int:
-    """Load a Shopee Excel file into database using batch inserts.
-
-    Data cleaning applied:
-    - Excludes blacklisted products (apple, iphone, ipad, etc.)
-    - Validates and cleans numeric fields
-    - Removes rows with invalid dates
-    - Deduplicates by (order_id, product_name, platform)
-    """
-    df = pd.read_excel(filepath)
-
-    # Check required columns
-    product_col = 'ชื่อสินค้า'
-    order_col = 'หมายเลขคำสั่งซื้อ'
-    if product_col not in df.columns or order_col not in df.columns:
-        return 0
-
-    # Fast blacklist filter
-    product_lower = df[product_col].fillna('').str.lower()
-    mask = ~product_lower.apply(lambda x: any(kw.lower() in x for kw in BLACKLIST_KEYWORDS))
-    df = df[mask]
-
-    if df.empty:
-        return 0
-
-    # Parse dates
-    df['created_at_dt'] = pd.to_datetime(df['วันที่ทำการสั่งซื้อ'], errors='coerce')
-    if df['created_at_dt'].isna().all():
-        df['created_at_dt'] = pd.to_datetime(df['วันที่ทำการสั่งซื้อ'], dayfirst=True, errors='coerce')
-
-    df = df[df['created_at_dt'].notna()]
-    if df.empty:
-        return 0
-
-    df['created_at'] = df['created_at_dt'].dt.strftime('%Y-%m-%dT%H:%M:%S')
-    df['date'] = df['created_at_dt'].dt.strftime('%Y-%m-%d')
-
-    # Vectorized data preparation with validation
-    df['order_id'] = df[order_col].astype(str).str.strip()
-    df['product_name'] = df[product_col].astype(str).str.strip().str[:500]
-
-    # Clean and validate numeric fields - replace negative values with 0
-    df['quantity'] = pd.to_numeric(df['จำนวน'], errors='coerce').fillna(0).clip(lower=0).astype(int)
-    df['subtotal_net'] = pd.to_numeric(df['ราคาขายสุทธิ'], errors='coerce').fillna(0).clip(lower=0)
-    df['order_total_amount'] = pd.to_numeric(df['จำนวนเงินทั้งหมด'], errors='coerce').fillna(0).clip(lower=0)
-
-    # Handle optional columns safely
-    df['seller_sku'] = df.get('เลขอ้างอิง SKU (SKU Reference No.)', pd.Series([''] * len(df))).astype(str).str.strip()
-    df['order_status'] = df.get('สถานะการสั่งซื้อ', pd.Series([''] * len(df))).astype(str).str.strip()
-
-    # Remove rows with empty order_id
-    df = df[df['order_id'] != '']
-    if df.empty:
-        return 0
-
-    # Prepare batch data using list comprehension
-    batch_data = list(zip(
-        df['order_id'],
-        ['Shopee'] * len(df),
-        df['product_name'],
-        df['quantity'],
-        df['subtotal_net'],
-        df['order_total_amount'],
-        df['created_at'],
-        df['date'],
-        df['seller_sku'],
-        df['order_status']
-    ))
-
-    # Batch insert with REPLACE to handle duplicates
-    if batch_data:
-        cursor.executemany('''
-            INSERT OR REPLACE INTO orders
-            (order_id, platform, product_name, quantity, subtotal_net,
-             order_total_amount, created_at, date, seller_sku, order_status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', batch_data)
-
-    return len(batch_data)
+    _conn_cache = conn
+    return conn
 
 
 @st.cache_resource
 def build_database(show_progress=True) -> bool:
-    """Build the SQLite database from source files."""
-    init_database()
-
-    with get_connection() as conn:
-        cursor = conn.cursor()
-
-        # Speed optimizations for bulk insert
-        cursor.execute("PRAGMA journal_mode = OFF")
-        cursor.execute("PRAGMA synchronous = OFF")
-        cursor.execute("PRAGMA cache_size = -64000")  # 64MB cache
-
-        # Get already loaded files
-        loaded_files = get_loaded_files()
-
-        # Get all files from local, cloud, and alt directories
-        tiktok_files = sorted(glob.glob(os.path.join(DATA_DIR, TIKTOK_PATTERN)))
-        shopee_files = sorted(glob.glob(os.path.join(DATA_DIR, SHOPEE_PATTERN)))
-
-        # Also check for gzip-compressed TikTok files
-        tiktok_files.extend(sorted(glob.glob(os.path.join(DATA_DIR, '*.csv.gz'))))
-
-        # Check cloud data directory
-        if os.path.exists(CLOUD_DATA_DIR):
-            tiktok_files.extend(sorted(glob.glob(os.path.join(CLOUD_DATA_DIR, TIKTOK_PATTERN))))
-            shopee_files.extend(sorted(glob.glob(os.path.join(CLOUD_DATA_DIR, SHOPEE_PATTERN))))
-            tiktok_files.extend(sorted(glob.glob(os.path.join(CLOUD_DATA_DIR, '*.csv'))))
-            tiktok_files.extend(sorted(glob.glob(os.path.join(CLOUD_DATA_DIR, '*.csv.gz'))))
-            shopee_files.extend(sorted(glob.glob(os.path.join(CLOUD_DATA_DIR, '*.xlsx'))))
-
-        # Check alt data directory
-        if os.path.exists(ALT_DATA_DIR):
-            tiktok_files.extend(sorted(glob.glob(os.path.join(ALT_DATA_DIR, TIKTOK_PATTERN))))
-            shopee_files.extend(sorted(glob.glob(os.path.join(ALT_DATA_DIR, SHOPEE_PATTERN))))
-            tiktok_files.extend(sorted(glob.glob(os.path.join(ALT_DATA_DIR, '*.csv'))))
-            tiktok_files.extend(sorted(glob.glob(os.path.join(ALT_DATA_DIR, '*.csv.gz'))))
-            shopee_files.extend(sorted(glob.glob(os.path.join(ALT_DATA_DIR, '*.xlsx'))))
-
-        # Filter to only new/modified files
-        new_tiktok = []
-        new_shopee = []
-
-        for filepath in tiktok_files:
-            filename = os.path.basename(filepath)
-            if filename not in loaded_files:
-                new_tiktok.append(filepath)
-
-        for filepath in shopee_files:
-            filename = os.path.basename(filepath)
-            if filename not in loaded_files:
-                new_shopee.append(filepath)
-
-        total_files = len(new_tiktok) + len(new_shopee)
-
-        if total_files == 0:
-            return True
-
-        if show_progress:
-            progress = st.progress(0, text="Loading new data...")
-            status = st.empty()
-
-        processed = 0
-        total_rows = 0
-
-        # Load new TikTok files
-        for filepath in new_tiktok:
-            filename = os.path.basename(filepath)
-            if show_progress:
-                status.text(f"Loading TikTok: {filename}")
-            rows = load_tiktok_to_db(filepath, cursor)
-            mark_file_loaded(filename, os.path.getmtime(filepath), rows, cursor)
-            total_rows += rows
-            processed += 1
-            if show_progress:
-                progress.progress(processed / total_files)
-
-        # Load new Shopee files
-        for filepath in new_shopee:
-            filename = os.path.basename(filepath)
-            if show_progress:
-                status.text(f"Loading Shopee: {filename}")
-            rows = load_shopee_to_db(filepath, cursor)
-            mark_file_loaded(filename, os.path.getmtime(filepath), rows, cursor)
-            total_rows += rows
-            processed += 1
-            if show_progress:
-                progress.progress(processed / total_files)
-
-        conn.commit()
-
-        if show_progress:
-            progress.empty()
-            status.empty()
-
-        if total_rows > 0:
-            print(f"[Database] Loaded {total_rows:,} new records from {total_files} files")
-
+    """Initialize the database views."""
+    try:
+        conn = init_database()
+        count = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+        if count > 0:
+            print(f"[DuckDB] Direct query ready: {count:,} records")
         return True
+    except Exception as e:
+        print(f"[DuckDB] Error: {e}")
+        return False
 
 
-def refresh_database():
-    """Refresh database by checking for new/modified files."""
-    init_database()
-
-    with get_connection() as conn:
-        cursor = conn.cursor()
-
-        # Get all files (including gzip-compressed)
-        tiktok_files = sorted(glob.glob(os.path.join(DATA_DIR, TIKTOK_PATTERN)))
-        tiktok_files.extend(sorted(glob.glob(os.path.join(DATA_DIR, '*.csv.gz'))))
-        shopee_files = sorted(glob.glob(os.path.join(DATA_DIR, SHOPEE_PATTERN)))
-
-        loaded_files = get_loaded_files()
-
-        new_files = []
-        for filepath in tiktok_files + shopee_files:
-            filename = os.path.basename(filepath)
-            if filename not in loaded_files:
-                new_files.append(filepath)
-
-        if not new_files:
-            return 0
-
-        total_rows = 0
-        for filepath in new_files:
-            filename = os.path.basename(filepath)
-            print(f"[Database] Loading new file: {filename}")
-
-            if filepath.endswith('.csv') or filepath.endswith('.csv.gz'):
-                rows = load_tiktok_to_db(filepath, cursor)
-            else:
-                rows = load_shopee_to_db(filepath, cursor)
-
-            mark_file_loaded(filename, os.path.getmtime(filepath), rows, cursor)
-            total_rows += rows
-
-        conn.commit()
-
-        if total_rows > 0:
-            print(f"[Database] Refreshed: {total_rows:,} new records from {len(new_files)} files")
-            # Clear Streamlit cache
-            st.cache_resource.clear()
-
-        return total_rows
+def refresh_database() -> int:
+    """Refresh by clearing cache and rebuilding."""
+    global _files_cache, _conn_cache
+    _files_cache = None
+    _conn_cache = None
+    st.cache_resource.clear()
+    return build_database(show_progress=False) or 0
 
 
 def get_new_files_count() -> int:
-    """Get count of new files not yet loaded."""
-    tiktok_files = sorted(glob.glob(os.path.join(DATA_DIR, TIKTOK_PATTERN)))
-    tiktok_files.extend(sorted(glob.glob(os.path.join(DATA_DIR, '*.csv.gz'))))
-    shopee_files = sorted(glob.glob(os.path.join(DATA_DIR, SHOPEE_PATTERN)))
-
-    loaded_files = get_loaded_files()
-
-    new_count = 0
-    for filepath in tiktok_files + shopee_files:
-        filename = os.path.basename(filepath)
-        if filename not in loaded_files:
-            new_count += 1
-
-    return new_count
+    return 0
 
 
 # =============================================================================
@@ -539,24 +225,16 @@ def query_revenue_by_period(
     compare_start: date = None,
     compare_end: date = None
 ) -> pd.DataFrame:
-    """
-    Query revenue data aggregated by time period.
-    Optionally includes comparison period data.
-    """
-    # Validate inputs
-    if start_date > end_date:
-        log_error(ValueError("start_date > end_date"), {'start': str(start_date), 'end': str(end_date)})
-        return pd.DataFrame()
+    conn = init_database()
 
-    # SQLite date format for grouping
     if granularity == 'D':
         group_expr = 'date'
     elif granularity == 'W':
-        group_expr = "strftime('%Y-W%W', date)"
+        group_expr = "DATE_TRUNC('week', date)"
     elif granularity == 'M':
-        group_expr = "strftime('%Y-%m', date)"
-    else:  # Q
-        group_expr = "strftime('%Y', date) || '-Q' || ((CAST(strftime('%m', date) AS INTEGER) - 1) / 3 + 1)"
+        group_expr = "DATE_TRUNC('month', date)"
+    else:
+        group_expr = "DATE_TRUNC('quarter', date)"
 
     platform_filter = "" if platform == 'All' else f"AND platform = '{platform}'"
 
@@ -574,20 +252,14 @@ def query_revenue_by_period(
         ORDER BY period
     '''
 
-    try:
-        with get_connection() as conn:
-            df = pd.read_sql_query(query, conn, params=[start_date.isoformat(), end_date.isoformat()])
+    df = conn.execute(query, [start_date, end_date]).fetchdf()
 
-            # Add comparison period if provided
-            if compare_start and compare_end:
-                df_compare = pd.read_sql_query(query, conn, params=[compare_start.isoformat(), compare_end.isoformat()])
-                df_compare['period_type'] = 'previous'
-                df = pd.concat([df, df_compare], ignore_index=True)
+    if compare_start and compare_end:
+        df_compare = conn.execute(query, [compare_start, compare_end]).fetchdf()
+        df_compare['period_type'] = 'previous'
+        df = pd.concat([df, df_compare], ignore_index=True)
 
-            return df
-    except Exception as e:
-        log_error(e, {'operation': 'query_revenue_by_period', 'start': str(start_date), 'end': str(end_date)})
-        return pd.DataFrame()
+    return df
 
 
 def query_aov_by_period(
@@ -598,18 +270,16 @@ def query_aov_by_period(
     compare_start: date = None,
     compare_end: date = None
 ) -> pd.DataFrame:
-    """Query AOV data by period."""
-    if start_date > end_date:
-        return pd.DataFrame()
+    conn = init_database()
 
     if granularity == 'D':
         group_expr = 'date'
     elif granularity == 'W':
-        group_expr = "strftime('%Y-W%W', date)"
+        group_expr = "DATE_TRUNC('week', date)"
     elif granularity == 'M':
-        group_expr = "strftime('%Y-%m', date)"
+        group_expr = "DATE_TRUNC('month', date)"
     else:
-        group_expr = "strftime('%Y', date) || '-Q' || ((CAST(strftime('%m', date) AS INTEGER) - 1) / 3 + 1)"
+        group_expr = "DATE_TRUNC('quarter', date)"
 
     platform_filter = "" if platform == 'All' else f"AND platform = '{platform}'"
 
@@ -627,19 +297,14 @@ def query_aov_by_period(
         ORDER BY period
     '''
 
-    try:
-        with get_connection() as conn:
-            df = pd.read_sql_query(query, conn, params=[start_date.isoformat(), end_date.isoformat()])
+    df = conn.execute(query, [start_date, end_date]).fetchdf()
 
-            if compare_start and compare_end:
-                df_compare = pd.read_sql_query(query, conn, params=[compare_start.isoformat(), compare_end.isoformat()])
-                df_compare['period_type'] = 'previous'
-                df = pd.concat([df, df_compare], ignore_index=True)
+    if compare_start and compare_end:
+        df_compare = conn.execute(query, [compare_start, compare_end]).fetchdf()
+        df_compare['period_type'] = 'previous'
+        df = pd.concat([df, df_compare], ignore_index=True)
 
-            return df
-    except Exception as e:
-        log_error(e, {'operation': 'query_aov_by_period'})
-        return pd.DataFrame()
+    return df
 
 
 def query_product_stats(
@@ -649,9 +314,7 @@ def query_product_stats(
     compare_start: date = None,
     compare_end: date = None
 ) -> pd.DataFrame:
-    """Query product statistics."""
-    if start_date > end_date:
-        return pd.DataFrame()
+    conn = init_database()
 
     platform_filter = "" if platform == 'All' else f"AND platform = '{platform}'"
 
@@ -669,19 +332,14 @@ def query_product_stats(
         ORDER BY revenue DESC
     '''
 
-    try:
-        with get_connection() as conn:
-            df = pd.read_sql_query(query, conn, params=[start_date.isoformat(), end_date.isoformat()])
+    df = conn.execute(query, [start_date, end_date]).fetchdf()
 
-            if compare_start and compare_end:
-                df_compare = pd.read_sql_query(query, conn, params=[compare_start.isoformat(), compare_end.isoformat()])
-                df_compare['period_type'] = 'previous'
-                df = pd.concat([df, df_compare], ignore_index=True)
+    if compare_start and compare_end:
+        df_compare = conn.execute(query, [compare_start, compare_end]).fetchdf()
+        df_compare['period_type'] = 'previous'
+        df = pd.concat([df, df_compare], ignore_index=True)
 
-            return df
-    except Exception as e:
-        log_error(e, {'operation': 'query_product_stats'})
-        return pd.DataFrame()
+    return df
 
 
 def query_summary_metrics(
@@ -689,155 +347,87 @@ def query_summary_metrics(
     end_date: date,
     platform: str = 'All'
 ) -> dict:
-    """Query summary metrics for a period."""
-    default_metrics = {'total_orders': 0, 'total_revenue': 0, 'total_quantity': 0, 'aov': 0, 'unique_products': 0}
-
-    if start_date > end_date:
-        return default_metrics
+    conn = init_database()
 
     platform_filter = "" if platform == 'All' else f"AND platform = '{platform}'"
 
     query = f'''
         SELECT
             COUNT(DISTINCT order_id) as total_orders,
-            SUM(subtotal_net) as total_revenue,
-            SUM(quantity) as total_quantity,
-            SUM(subtotal_net) * 1.0 / COUNT(DISTINCT order_id) as aov,
+            COALESCE(SUM(subtotal_net), 0) as total_revenue,
+            COALESCE(SUM(quantity), 0) as total_quantity,
+            CASE
+                WHEN COUNT(DISTINCT order_id) > 0
+                THEN SUM(subtotal_net) * 1.0 / COUNT(DISTINCT order_id)
+                ELSE 0
+            END as aov,
             COUNT(DISTINCT product_name) as unique_products
         FROM orders
         WHERE date >= ? AND date <= ? {platform_filter}
     '''
 
-    try:
-        with get_connection() as conn:
-            result = pd.read_sql_query(query, conn, params=[start_date.isoformat(), end_date.isoformat()])
-
-            if result.empty:
-                return default_metrics
-
-            return result.iloc[0].to_dict()
-    except Exception as e:
-        log_error(e, {'operation': 'query_summary_metrics'})
-        return default_metrics
+    result = conn.execute(query, [start_date, end_date]).fetchone()
+    if result:
+        return {
+            'total_orders': result[0] or 0,
+            'total_revenue': result[1] or 0,
+            'total_quantity': result[2] or 0,
+            'aov': result[3] or 0,
+            'unique_products': result[4] or 0
+        }
+    return {'total_orders': 0, 'total_revenue': 0, 'total_quantity': 0, 'aov': 0, 'unique_products': 0}
 
 
 def query_date_range() -> Tuple[date, date]:
-    """Get the min and max dates in the database."""
+    conn = init_database()
     try:
-        with get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT MIN(date), MAX(date) FROM orders')
-            result = cursor.fetchone()
-
-            if result[0] and result[1]:
-                return date.fromisoformat(result[0]), date.fromisoformat(result[1])
-
-            return date.today(), date.today()
-    except Exception as e:
-        log_error(e, {'operation': 'query_date_range'})
-        return date.today(), date.today()
+        result = conn.execute("SELECT MIN(date), MAX(date) FROM orders").fetchone()
+        if result[0] and result[1]:
+            return result[0], result[1]
+    except:
+        pass
+    return date.today(), date.today()
 
 
 def get_db_stats() -> dict:
-    """Get database statistics."""
+    conn = init_database()
     try:
-        with get_connection() as conn:
-            cursor = conn.cursor()
+        total_rows = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+        unique_orders = conn.execute("SELECT COUNT(DISTINCT order_id) FROM orders").fetchone()[0]
+        unique_products = conn.execute("SELECT COUNT(DISTINCT product_name) FROM orders").fetchone()[0]
 
-            cursor.execute('SELECT COUNT(*) FROM orders')
-            total_rows = cursor.fetchone()[0]
+        by_platform = {}
+        result = conn.execute("SELECT platform, COUNT(*) FROM orders GROUP BY platform").fetchall()
+        for row in result:
+            by_platform[row[0]] = row[1]
 
-            cursor.execute('SELECT COUNT(DISTINCT order_id) FROM orders')
-            unique_orders = cursor.fetchone()[0]
-
-            cursor.execute('SELECT COUNT(DISTINCT product_name) FROM orders')
-            unique_products = cursor.fetchone()[0]
-
-            cursor.execute('SELECT platform, COUNT(*) FROM orders GROUP BY platform')
-            by_platform = dict(cursor.fetchall())
-
-            return {
-                'total_rows': total_rows,
-                'unique_orders': unique_orders,
-                'unique_products': unique_products,
-                'by_platform': by_platform
-            }
-    except Exception as e:
-        log_error(e, {'operation': 'get_db_stats'})
+        return {
+            'total_rows': total_rows,
+            'unique_orders': unique_orders,
+            'unique_products': unique_products,
+            'by_platform': by_platform
+        }
+    except:
         return {'total_rows': 0, 'unique_orders': 0, 'unique_products': 0, 'by_platform': {}}
 
 
 def is_database_empty() -> bool:
-    """Check if database has no data."""
-    try:
-        with get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT COUNT(*) FROM orders')
-            return cursor.fetchone()[0] == 0
-    except Exception:
-        return True
-
-
-def load_uploaded_file(uploaded_file) -> int:
-    """Load an uploaded file (from Streamlit file uploader) into database."""
-    init_database()
-
-    filename = uploaded_file.name.lower()
-    total_rows = 0
-
-    with get_connection() as conn:
-        cursor = conn.cursor()
-
-        # Save to temp file and process
-        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp:
-            tmp.write(uploaded_file.getvalue())
-            tmp_path = tmp.name
-
-        try:
-            if filename.endswith('.csv') or filename.endswith('.csv.gz'):
-                # Check if it's a TikTok file (has Thai characters in pattern)
-                if 'คำสั่งซื้อ' in uploaded_file.name or 'tiktok' in filename:
-                    total_rows = load_tiktok_to_db(tmp_path, cursor)
-            elif filename.endswith('.xlsx'):
-                # Check if it's a Shopee file
-                if uploaded_file.name.startswith('Order.all.'):
-                    total_rows = load_shopee_to_db(tmp_path, cursor)
-
-            conn.commit()
-        finally:
-            os.unlink(tmp_path)
-
-    return total_rows
+    files = get_data_files()
+    return len(files['tiktok']) == 0 and len(files['shopee']) == 0
 
 
 def load_multiple_uploaded_files(uploaded_files) -> int:
-    """Load multiple uploaded files into database."""
-    init_database()
-    total_rows = 0
+    data_dir = os.path.join(PROJECT_ROOT, 'data')
+    os.makedirs(data_dir, exist_ok=True)
 
-    with get_connection() as conn:
-        cursor = conn.cursor()
+    for uploaded_file in uploaded_files:
+        dest_path = os.path.join(data_dir, uploaded_file.name)
+        with open(dest_path, 'wb') as f:
+            f.write(uploaded_file.getvalue())
 
-        for uploaded_file in uploaded_files:
-            filename = uploaded_file.name.lower()
+    global _files_cache, _conn_cache
+    _files_cache = None
+    _conn_cache = None
+    st.cache_resource.clear()
 
-            # Save to temp file and process
-            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp:
-                tmp.write(uploaded_file.getvalue())
-                tmp_path = tmp.name
-
-            try:
-                if filename.endswith('.csv') or filename.endswith('.csv.gz'):
-                    rows = load_tiktok_to_db(tmp_path, cursor)
-                elif filename.endswith('.xlsx'):
-                    rows = load_shopee_to_db(tmp_path, cursor)
-                else:
-                    rows = 0
-
-                total_rows += rows
-            finally:
-                os.unlink(tmp_path)
-
-        conn.commit()
-
-    return total_rows
+    return len(uploaded_files)

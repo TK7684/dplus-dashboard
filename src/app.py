@@ -58,39 +58,6 @@ from data.database import (
     is_database_empty,
     load_multiple_uploaded_files
 )
-
-# Try to import DuckDB version (faster)
-try:
-    from data.database_duckdb import (
-        build_database as build_database_duckdb,
-        refresh_database as refresh_database_duckdb,
-        get_new_files_count as get_new_files_count_duckdb,
-        query_revenue_by_period as query_revenue_by_period_duckdb,
-        query_aov_by_period as query_aov_by_period_duckdb,
-        query_product_stats as query_product_stats_duckdb,
-        query_summary_metrics as query_summary_metrics_duckdb,
-        query_date_range as query_date_range_duckdb,
-        get_db_stats as get_db_stats_duckdb,
-        is_database_empty as is_database_empty_duckdb,
-        load_multiple_uploaded_files as load_multiple_uploaded_files_duckdb
-    )
-    # Use DuckDB versions
-    build_database = build_database_duckdb
-    refresh_database = refresh_database_duckdb
-    get_new_files_count = get_new_files_count_duckdb
-    query_revenue_by_period = query_revenue_by_period_duckdb
-    query_aov_by_period = query_aov_by_period_duckdb
-    query_product_stats = query_product_stats_duckdb
-    query_summary_metrics = query_summary_metrics_duckdb
-    query_date_range = query_date_range_duckdb
-    get_db_stats = get_db_stats_duckdb
-    is_database_empty = is_database_empty_duckdb
-    load_multiple_uploaded_files = load_multiple_uploaded_files_duckdb
-    USE_DUCKDB = True
-except ImportError:
-    USE_DUCKDB = False
-
-from data.hf_datasets import ensure_data_available, download_from_hf
 from data.time_utils import format_period_label, calculate_change
 from components.sidebar import render_sidebar
 from components.revenue_chart import render_revenue_chart, calculate_revenue_segments
@@ -639,16 +606,7 @@ def main():
     if 'auto_refresh' not in st.session_state:
         st.session_state.auto_refresh = True
 
-    # Try to download data from Hugging Face if no local data
-    if is_database_empty():
-        with st.spinner("Downloading data from cloud..."):
-            files = download_from_hf(
-                progress_callback=lambda p, m: None
-            )
-            if files > 0:
-                st.success(f"Downloaded {files} data files")
-
-    # Build/refresh database
+    # Build/refresh database - DuckDB queries files directly
     with st.spinner("Loading..."):
         build_database(show_progress=False)
 
