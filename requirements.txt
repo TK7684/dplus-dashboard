@@ -7,3 +7,4 @@ watchdog>=3.0.0
 scipy>=1.10.0
 reportlab>=4.0.0
 kaleido>=0.2.0
+huggingface_hub>=0.20.0

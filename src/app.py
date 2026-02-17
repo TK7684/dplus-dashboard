@@ -58,6 +58,7 @@ from data.database import (
     is_database_empty,
     load_multiple_uploaded_files
 )
+from data.hf_datasets import ensure_data_available, download_from_hf
 from data.time_utils import format_period_label, calculate_change
 from components.sidebar import render_sidebar
 from components.revenue_chart import render_revenue_chart, calculate_revenue_segments
@@ -606,7 +607,16 @@ def main():
     if 'auto_refresh' not in st.session_state:
         st.session_state.auto_refresh = True
 
-    # Build/refresh database (only if local files exist)
+    # Try to download data from Hugging Face if no local data
+    if is_database_empty():
+        with st.spinner("Downloading data from cloud..."):
+            files = download_from_hf(
+                progress_callback=lambda p, m: None
+            )
+            if files > 0:
+                st.success(f"Downloaded {files} data files")
+
+    # Build/refresh database
     with st.spinner("Loading..."):
         build_database(show_progress=False)
 
