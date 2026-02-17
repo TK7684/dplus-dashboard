@@ -21,7 +21,9 @@ from data.database import (
     query_product_stats,
     query_summary_metrics,
     query_date_range,
-    get_db_stats
+    get_db_stats,
+    is_database_empty,
+    load_multiple_uploaded_files
 )
 from data.time_utils import format_period_label, calculate_change
 from components.sidebar import render_sidebar
@@ -546,9 +548,56 @@ def main():
     if 'auto_refresh' not in st.session_state:
         st.session_state.auto_refresh = True
 
-    # Build/refresh database
+    # Build/refresh database (only if local files exist)
     with st.spinner("Loading..."):
-        build_database(show_progress=True)
+        build_database(show_progress=False)
+
+    # Check if database is empty and show uploader
+    if is_database_empty():
+        st.title("D Plus Skin Analytics")
+        st.markdown('<p class="dashboard-subtitle">Skincare & Wellness Performance Dashboard</p>', unsafe_allow_html=True)
+
+        st.markdown("---")
+
+        st.markdown(f"""
+        <div style="background: linear-gradient(135deg, rgba(74, 124, 111, 0.08) 0%, rgba(96, 165, 250, 0.08) 100%);
+                    border: 1px solid rgba(74, 124, 111, 0.2); border-left: 4px solid {COLORS['Primary']};
+                    padding: 1.5rem; border-radius: 12px; margin: 2rem 0;">
+            <h3 style="color: {COLORS['Primary']}; margin-bottom: 0.5rem;">Upload Your Data Files</h3>
+            <p style="color: {COLORS['TextLight']}; margin-bottom: 1rem;">
+                Upload your TikTok CSV or Shopee Excel files to get started.
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        uploaded_files = st.file_uploader(
+            "Choose data files",
+            accept_multiple_files=True,
+            type=['csv', 'xlsx'],
+            help="Upload TikTok CSV files (ทั้งหมด คำสั่งซื้อ-*.csv) or Shopee Excel files (Order.all.*.xlsx)"
+        )
+
+        if uploaded_files:
+            if st.button("Load Files", type="primary"):
+                with st.spinner(f"Loading {len(uploaded_files)} file(s)..."):
+                    rows = load_multiple_uploaded_files(uploaded_files)
+                    if rows > 0:
+                        st.success(f"Loaded {rows:,} records from {len(uploaded_files)} file(s)!")
+                        st.rerun()
+                    else:
+                        st.error("No data could be loaded. Please check file format.")
+
+        st.markdown(f"""
+        <div style="margin-top: 2rem; padding: 1rem; background: {COLORS['Card']}; border-radius: 8px; border: 1px solid {COLORS['Border']};">
+            <h4 style="color: {COLORS['Text']}; margin-bottom: 0.75rem;">Supported File Formats</h4>
+            <ul style="color: {COLORS['TextLight']}; margin: 0; padding-left: 1.5rem;">
+                <li><b>TikTok:</b> CSV files with Thai filename pattern "ทั้งหมด คำสั่งซื้อ-*.csv"</li>
+                <li><b>Shopee:</b> Excel files with pattern "Order.all.*.xlsx"</li>
+            </ul>
+        </div>
+        """, unsafe_allow_html=True)
+
+        return
 
     # Check for new files and show refresh button if needed
     new_files = get_new_files_count()

@@ -13,6 +13,7 @@ from datetime import date, datetime
 import glob
 from contextlib import contextmanager
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -667,3 +668,79 @@ def get_db_stats() -> dict:
     except Exception as e:
         log_error(e, {'operation': 'get_db_stats'})
         return {'total_rows': 0, 'unique_orders': 0, 'unique_products': 0, 'by_platform': {}}
+
+
+def is_database_empty() -> bool:
+    """Check if database has no data."""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT COUNT(*) FROM orders')
+            return cursor.fetchone()[0] == 0
+    except Exception:
+        return True
+
+
+def load_uploaded_file(uploaded_file) -> int:
+    """Load an uploaded file (from Streamlit file uploader) into database."""
+    init_database()
+
+    filename = uploaded_file.name.lower()
+    total_rows = 0
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+
+        # Save to temp file and process
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp:
+            tmp.write(uploaded_file.getvalue())
+            tmp_path = tmp.name
+
+        try:
+            if filename.endswith('.csv'):
+                # Check if it's a TikTok file (has Thai characters in pattern)
+                if 'คำสั่งซื้อ' in uploaded_file.name or 'tiktok' in filename:
+                    total_rows = load_tiktok_to_db(tmp_path, cursor)
+            elif filename.endswith('.xlsx'):
+                # Check if it's a Shopee file
+                if uploaded_file.name.startswith('Order.all.'):
+                    total_rows = load_shopee_to_db(tmp_path, cursor)
+
+            conn.commit()
+        finally:
+            os.unlink(tmp_path)
+
+    return total_rows
+
+
+def load_multiple_uploaded_files(uploaded_files) -> int:
+    """Load multiple uploaded files into database."""
+    init_database()
+    total_rows = 0
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+
+        for uploaded_file in uploaded_files:
+            filename = uploaded_file.name.lower()
+
+            # Save to temp file and process
+            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp:
+                tmp.write(uploaded_file.getvalue())
+                tmp_path = tmp.name
+
+            try:
+                if filename.endswith('.csv'):
+                    rows = load_tiktok_to_db(tmp_path, cursor)
+                elif filename.endswith('.xlsx'):
+                    rows = load_shopee_to_db(tmp_path, cursor)
+                else:
+                    rows = 0
+
+                total_rows += rows
+            finally:
+                os.unlink(tmp_path)
+
+        conn.commit()
+
+    return total_rows
