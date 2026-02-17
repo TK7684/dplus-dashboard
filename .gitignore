@@ -35,8 +35,10 @@ ENV/
 logs/
 *.log
 
-# Database
+# Database (local cache)
 *.db
+*.db-shm
+*.db-wal
 
 # Streamlit
 .streamlit/secrets.toml
@@ -47,17 +49,24 @@ Thumbs.db
 
 # Agent files
 .agent/
+.claude/
+.devcontainer/
 
-# Sales data - NEVER commit
+# Original data files - NEVER commit
 Original files/
+
+# Local database cache
 dplus_cache.db
 
-# Allow data folder for cloud deployment (password protected)
-# Data files in src/data/uploaded/ are included in repo
-!src/data/uploaded/*.xlsx
-!src/data/uploaded/*.csv
+# Temporary batch files
+*.bat
+*.ps1
 
-# But exclude large files (>50MB)
-src/data/uploaded/*13_5*.csv
-src/data/uploaded/*13_6*.csv
-src/data/uploaded/*14_00*.csv
+# Temporary markdown files
+FAST_*.md
+FIX_*.md
+QUICK_*.md
+SUCCESS_*.md
+FINAL_*.md
+ONE_*.md
+ULTIMATE_*.md

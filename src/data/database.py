@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
     DATA_DIR,
     CLOUD_DATA_DIR,
+    ALT_DATA_DIR,
     TIKTOK_PATTERN,
     SHOPEE_PATTERN,
     BLACKLIST_KEYWORDS
@@ -185,7 +186,14 @@ def is_blacklisted(product_name: str) -> bool:
 
 
 def load_tiktok_to_db(filepath: str, cursor) -> int:
-    """Load a TikTok CSV file into database using batch inserts. Supports gzip compression."""
+    """Load a TikTok CSV file into database using batch inserts. Supports gzip compression.
+
+    Data cleaning applied:
+    - Excludes blacklisted products (apple, iphone, ipad, etc.)
+    - Validates and cleans numeric fields
+    - Removes rows with invalid dates
+    - Deduplicates by (order_id, product_name, platform)
+    """
     # Check if file is gzip compressed
     is_gzipped = filepath.endswith('.gz')
 
@@ -203,15 +211,18 @@ def load_tiktok_to_db(filepath: str, cursor) -> int:
 
     df.columns = df.columns.str.strip()
 
-    # Filter blacklisted products
+    # Check required columns
     product_col = 'Product Name'
-    if product_col not in df.columns:
+    if product_col not in df.columns or 'Order ID' not in df.columns:
         return 0
 
     # Fast blacklist filter using vectorized operations
     product_lower = df[product_col].fillna('').str.lower()
     mask = ~product_lower.apply(lambda x: any(kw.lower() in x for kw in BLACKLIST_KEYWORDS))
     df = df[mask]
+
+    if df.empty:
+        return 0
 
     # Parse dates - Bangkok timezone (data is already in BKK time)
     df['created_at_dt'] = pd.to_datetime(df['Created Time'], format='%d/%m/%Y %H:%M:%S', errors='coerce')
@@ -225,15 +236,24 @@ def load_tiktok_to_db(filepath: str, cursor) -> int:
     df['created_at'] = df['created_at_dt'].dt.strftime('%Y-%m-%dT%H:%M:%S')
     df['date'] = df['created_at_dt'].dt.strftime('%Y-%m-%d')
 
-    # Vectorized data preparation (much faster than iterrows)
+    # Vectorized data preparation with validation
     df['order_id'] = df['Order ID'].astype(str).str.strip()
     df['product_name'] = df['Product Name'].astype(str).str.strip().str[:500]
-    df['quantity'] = pd.to_numeric(df['Quantity'], errors='coerce').fillna(0).astype(int)
-    df['subtotal_net'] = pd.to_numeric(df['SKU Subtotal After Discount'], errors='coerce').fillna(0)
-    df['order_total_amount'] = pd.to_numeric(df['Order Amount'], errors='coerce').fillna(0)
-    df['seller_sku'] = df.get('Seller SKU', '').astype(str).str.strip()
-    df['order_status'] = df.get('Order Status', '').astype(str).str.strip()
-    df['product_category'] = df.get('Product Category', '').astype(str).str.strip()
+
+    # Clean and validate numeric fields - replace negative values with 0
+    df['quantity'] = pd.to_numeric(df['Quantity'], errors='coerce').fillna(0).clip(lower=0).astype(int)
+    df['subtotal_net'] = pd.to_numeric(df['SKU Subtotal After Discount'], errors='coerce').fillna(0).clip(lower=0)
+    df['order_total_amount'] = pd.to_numeric(df['Order Amount'], errors='coerce').fillna(0).clip(lower=0)
+
+    # Handle optional columns safely
+    df['seller_sku'] = df.get('Seller SKU', pd.Series([''] * len(df))).astype(str).str.strip()
+    df['order_status'] = df.get('Order Status', pd.Series([''] * len(df))).astype(str).str.strip()
+    df['product_category'] = df.get('Product Category', pd.Series([''] * len(df))).astype(str).str.strip()
+
+    # Remove rows with empty order_id
+    df = df[df['order_id'] != '']
+    if df.empty:
+        return 0
 
     # Prepare batch data using list comprehension (faster)
     batch_data = list(zip(
@@ -250,7 +270,7 @@ def load_tiktok_to_db(filepath: str, cursor) -> int:
         df['product_category']
     ))
 
-    # Batch insert
+    # Batch insert with REPLACE to handle duplicates
     if batch_data:
         cursor.executemany('''
             INSERT OR REPLACE INTO orders
@@ -263,18 +283,29 @@ def load_tiktok_to_db(filepath: str, cursor) -> int:
 
 
 def load_shopee_to_db(filepath: str, cursor) -> int:
-    """Load a Shopee Excel file into database using batch inserts."""
+    """Load a Shopee Excel file into database using batch inserts.
+
+    Data cleaning applied:
+    - Excludes blacklisted products (apple, iphone, ipad, etc.)
+    - Validates and cleans numeric fields
+    - Removes rows with invalid dates
+    - Deduplicates by (order_id, product_name, platform)
+    """
     df = pd.read_excel(filepath)
 
-    # Filter blacklisted products
+    # Check required columns
     product_col = 'ชื่อสินค้า'
-    if product_col not in df.columns:
+    order_col = 'หมายเลขคำสั่งซื้อ'
+    if product_col not in df.columns or order_col not in df.columns:
         return 0
 
     # Fast blacklist filter
     product_lower = df[product_col].fillna('').str.lower()
     mask = ~product_lower.apply(lambda x: any(kw.lower() in x for kw in BLACKLIST_KEYWORDS))
     df = df[mask]
+
+    if df.empty:
+        return 0
 
     # Parse dates
     df['created_at_dt'] = pd.to_datetime(df['วันที่ทำการสั่งซื้อ'], errors='coerce')
@@ -288,14 +319,23 @@ def load_shopee_to_db(filepath: str, cursor) -> int:
     df['created_at'] = df['created_at_dt'].dt.strftime('%Y-%m-%dT%H:%M:%S')
     df['date'] = df['created_at_dt'].dt.strftime('%Y-%m-%d')
 
-    # Vectorized data preparation
-    df['order_id'] = df['หมายเลขคำสั่งซื้อ'].astype(str).str.strip()
-    df['product_name'] = df['ชื่อสินค้า'].astype(str).str.strip().str[:500]
-    df['quantity'] = pd.to_numeric(df['จำนวน'], errors='coerce').fillna(0).astype(int)
-    df['subtotal_net'] = pd.to_numeric(df['ราคาขายสุทธิ'], errors='coerce').fillna(0)
-    df['order_total_amount'] = pd.to_numeric(df['จำนวนเงินทั้งหมด'], errors='coerce').fillna(0)
-    df['seller_sku'] = df.get('เลขอ้างอิง SKU (SKU Reference No.)', '').astype(str).str.strip()
-    df['order_status'] = df.get('สถานะการสั่งซื้อ', '').astype(str).str.strip()
+    # Vectorized data preparation with validation
+    df['order_id'] = df[order_col].astype(str).str.strip()
+    df['product_name'] = df[product_col].astype(str).str.strip().str[:500]
+
+    # Clean and validate numeric fields - replace negative values with 0
+    df['quantity'] = pd.to_numeric(df['จำนวน'], errors='coerce').fillna(0).clip(lower=0).astype(int)
+    df['subtotal_net'] = pd.to_numeric(df['ราคาขายสุทธิ'], errors='coerce').fillna(0).clip(lower=0)
+    df['order_total_amount'] = pd.to_numeric(df['จำนวนเงินทั้งหมด'], errors='coerce').fillna(0).clip(lower=0)
+
+    # Handle optional columns safely
+    df['seller_sku'] = df.get('เลขอ้างอิง SKU (SKU Reference No.)', pd.Series([''] * len(df))).astype(str).str.strip()
+    df['order_status'] = df.get('สถานะการสั่งซื้อ', pd.Series([''] * len(df))).astype(str).str.strip()
+
+    # Remove rows with empty order_id
+    df = df[df['order_id'] != '']
+    if df.empty:
+        return 0
 
     # Prepare batch data using list comprehension
     batch_data = list(zip(
@@ -311,7 +351,7 @@ def load_shopee_to_db(filepath: str, cursor) -> int:
         df['order_status']
     ))
 
-    # Batch insert
+    # Batch insert with REPLACE to handle duplicates
     if batch_data:
         cursor.executemany('''
             INSERT OR REPLACE INTO orders
@@ -339,21 +379,28 @@ def build_database(show_progress=True) -> bool:
         # Get already loaded files
         loaded_files = get_loaded_files()
 
-        # Get all files from both local and cloud directories
+        # Get all files from local, cloud, and alt directories
         tiktok_files = sorted(glob.glob(os.path.join(DATA_DIR, TIKTOK_PATTERN)))
         shopee_files = sorted(glob.glob(os.path.join(DATA_DIR, SHOPEE_PATTERN)))
 
         # Also check for gzip-compressed TikTok files
         tiktok_files.extend(sorted(glob.glob(os.path.join(DATA_DIR, '*.csv.gz'))))
 
-        # Also check cloud data directory
+        # Check cloud data directory
         if os.path.exists(CLOUD_DATA_DIR):
             tiktok_files.extend(sorted(glob.glob(os.path.join(CLOUD_DATA_DIR, TIKTOK_PATTERN))))
             shopee_files.extend(sorted(glob.glob(os.path.join(CLOUD_DATA_DIR, SHOPEE_PATTERN))))
-            # Also check for any xlsx/csv files in cloud dir
             tiktok_files.extend(sorted(glob.glob(os.path.join(CLOUD_DATA_DIR, '*.csv'))))
             tiktok_files.extend(sorted(glob.glob(os.path.join(CLOUD_DATA_DIR, '*.csv.gz'))))
             shopee_files.extend(sorted(glob.glob(os.path.join(CLOUD_DATA_DIR, '*.xlsx'))))
+
+        # Check alt data directory
+        if os.path.exists(ALT_DATA_DIR):
+            tiktok_files.extend(sorted(glob.glob(os.path.join(ALT_DATA_DIR, TIKTOK_PATTERN))))
+            shopee_files.extend(sorted(glob.glob(os.path.join(ALT_DATA_DIR, SHOPEE_PATTERN))))
+            tiktok_files.extend(sorted(glob.glob(os.path.join(ALT_DATA_DIR, '*.csv'))))
+            tiktok_files.extend(sorted(glob.glob(os.path.join(ALT_DATA_DIR, '*.csv.gz'))))
+            shopee_files.extend(sorted(glob.glob(os.path.join(ALT_DATA_DIR, '*.xlsx'))))
 
         # Filter to only new/modified files
         new_tiktok = []

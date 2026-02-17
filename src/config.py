@@ -66,11 +66,14 @@ EFFECTS = {
 
 # =============================================================================
 # Product Blacklist (Non-Skincare/Supplement items to exclude)
+# Case-insensitive matching - excludes apple, iphone, ipad products
 # =============================================================================
 BLACKLIST_KEYWORDS = [
-    'apple', 'iphone', 'ipad', 'samsung', 'galaxy', 'case', 'charger',
-    'cable', 'headphone', 'earphone', 'electronics', 'accessories',
-    'tempered glass', 'screen protector', 'phone cover'
+    'apple', 'iphone', 'ipad', 'macbook', 'airpods', 'apple watch',
+    'samsung', 'galaxy', 'case', 'charger', 'cable', 'headphone',
+    'earphone', 'earbuds', 'electronics', 'accessories', 'adapter',
+    'tempered glass', 'screen protector', 'phone cover', 'phone case',
+    'wireless charger', 'power bank', 'usb', 'lightning', 'type-c'
 ]
 
 # =============================================================================
@@ -133,11 +136,15 @@ import os
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Local data directory (not in git)
+# Local data directory (not in git) - for development
 DATA_DIR = os.path.join(PROJECT_ROOT, 'Original files')
 
-# Cloud data directory (included in git for Streamlit Cloud)
+# Cloud data directory (included in git for deployment)
+# Check if running in Hugging Face Spaces or similar cloud environment
 CLOUD_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'uploaded')
+
+# Also check for data in project root data folder
+ALT_DATA_DIR = os.path.join(PROJECT_ROOT, 'data')
 
 TIKTOK_PATTERN = 'ทั้งหมด คำสั่งซื้อ-*.csv'
 SHOPEE_PATTERN = 'Order.all.*.xlsx'
