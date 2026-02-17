@@ -412,8 +412,19 @@ def get_db_stats() -> dict:
 
 
 def is_database_empty() -> bool:
+    """Check if data files exist."""
     files = get_data_files()
     return len(files['tiktok']) == 0 and len(files['shopee']) == 0
+
+
+def has_data() -> bool:
+    """Check if data is actually loaded in the database."""
+    try:
+        conn = init_database()
+        count = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+        return count > 0
+    except:
+        return False
 
 
 def load_multiple_uploaded_files(uploaded_files) -> int:

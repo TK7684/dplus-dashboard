@@ -606,6 +606,11 @@ def main():
     if 'auto_refresh' not in st.session_state:
         st.session_state.auto_refresh = True
 
+    # Clear cache on first load to ensure fresh data
+    if 'cache_cleared' not in st.session_state:
+        st.cache_resource.clear()
+        st.session_state.cache_cleared = True
+
     # Build/refresh database - DuckDB queries files directly
     with st.spinner("Loading..."):
         build_database(show_progress=False)
