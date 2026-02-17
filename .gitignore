@@ -53,6 +53,11 @@ Original files/
 dplus_cache.db
 
 # Allow data folder for cloud deployment (password protected)
-# Put your data files in src/data/uploaded/ folder to include in repo
-# !src/data/uploaded/*.xlsx
-# !src/data/uploaded/*.csv
+# Data files in src/data/uploaded/ are included in repo
+!src/data/uploaded/*.xlsx
+!src/data/uploaded/*.csv
+
+# But exclude large files (>50MB)
+src/data/uploaded/*13_5*.csv
+src/data/uploaded/*13_6*.csv
+src/data/uploaded/*14_00*.csv
