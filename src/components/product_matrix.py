@@ -105,7 +105,7 @@ def render_product_matrix(
         )
     )
 
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
 
     # Summary with modern metric cards
     hero = len(current_data[current_data['matrix_segment'] == 'Max (Hero)'])

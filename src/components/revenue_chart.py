@@ -101,7 +101,7 @@ def render_revenue_chart(
         )
     )
 
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
 
     # Summary row
     total_revenue = current_data['revenue'].sum()

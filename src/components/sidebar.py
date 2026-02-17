@@ -63,14 +63,14 @@ def render_sidebar(min_date: date, max_date: date) -> Dict:
     q_col1, q_col2 = st.sidebar.columns(2)
 
     with q_col1:
-        if st.button("Q1", key="q1_btn", width="stretch"):
+        if st.button("Q1", key="q1_btn"):
             q_start, q_end = get_quarter_range(1, current_year)
             if q_start and q_end:
                 st.session_state.start_date = max(q_start, min_date)
                 st.session_state.end_date = min(q_end, max_date)
                 st.session_state.date_preset = 'Q1'
                 st.rerun()
-        if st.button("Q3", key="q3_btn", width="stretch"):
+        if st.button("Q3", key="q3_btn"):
             q_start, q_end = get_quarter_range(3, current_year)
             if q_start and q_end:
                 st.session_state.start_date = max(q_start, min_date)
@@ -79,14 +79,14 @@ def render_sidebar(min_date: date, max_date: date) -> Dict:
                 st.rerun()
 
     with q_col2:
-        if st.button("Q2", key="q2_btn", width="stretch"):
+        if st.button("Q2", key="q2_btn"):
             q_start, q_end = get_quarter_range(2, current_year)
             if q_start and q_end:
                 st.session_state.start_date = max(q_start, min_date)
                 st.session_state.end_date = min(q_end, max_date)
                 st.session_state.date_preset = 'Q2'
                 st.rerun()
-        if st.button("Q4", key="q4_btn", width="stretch"):
+        if st.button("Q4", key="q4_btn"):
             q_start, q_end = get_quarter_range(4, current_year)
             if q_start and q_end:
                 st.session_state.start_date = max(q_start, min_date)

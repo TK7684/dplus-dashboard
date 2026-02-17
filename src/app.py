@@ -24,17 +24,18 @@ def check_password():
 
     def password_entered():
         """Checks whether a password entered by the user is correct."""
-        if hashlib.sha1(st.session_state["password"].encode()).hexdigest() == APP_PASSWORD_HASH:
-            st.session_state["password_correct"] = True
-            del st.session_state["password"]
-        else:
-            st.session_state["password_correct"] = False
+        if "password" in st.session_state and st.session_state["password"]:
+            if hashlib.sha1(st.session_state["password"].encode()).hexdigest() == APP_PASSWORD_HASH:
+                st.session_state["password_correct"] = True
+                del st.session_state["password"]
+            else:
+                st.session_state["password_correct"] = False
 
     if "password_correct" not in st.session_state:
         # First run, show input
         st.text_input("Password", type="password", on_change=password_entered, key="password")
         return False
-    elif not st.session_state["password_correct"]:
+    elif not st.session_state.get("password_correct", False):
         # Wrong password, show input again
         st.text_input("Password", type="password", on_change=password_entered, key="password")
         st.error("Incorrect password")
@@ -473,6 +474,21 @@ def setup_page():
         header {{ height: 0 !important; }}
 
         /* ========================================
+           Sidebar Toggle - Always Visible
+           ======================================== */
+        /* Ensure sidebar collapse button is always visible */
+        [data-testid="collapsedControl"] {{
+            display: flex !important;
+            visibility: visible !important;
+        }}
+
+        /* Make sure the sidebar toggle arrow is visible */
+        button[kind="header"] {{
+            display: flex !important;
+            visibility: visible !important;
+        }}
+
+        /* ========================================
            Loading Spinner
            ======================================== */
         .stSpinner > div {{
@@ -653,7 +669,7 @@ def main():
 
     with col_refresh:
         # Refresh button
-        if st.button("Refresh Data", key="refresh_btn", width="stretch"):
+        if st.button("Refresh Data", key="refresh_btn"):
             with st.spinner("Refreshing..."):
                 rows = refresh_database()
                 if rows > 0:

@@ -185,14 +185,21 @@ def is_blacklisted(product_name: str) -> bool:
 
 
 def load_tiktok_to_db(filepath: str, cursor) -> int:
-    """Load a TikTok CSV file into database using batch inserts."""
+    """Load a TikTok CSV file into database using batch inserts. Supports gzip compression."""
+    # Check if file is gzip compressed
+    is_gzipped = filepath.endswith('.gz')
+
+    read_csv_kwargs = {'low_memory': False}
+    if is_gzipped:
+        read_csv_kwargs['compression'] = 'gzip'
+
     try:
-        df = pd.read_csv(filepath, encoding='utf-8', low_memory=False)
+        df = pd.read_csv(filepath, encoding='utf-8', **read_csv_kwargs)
     except UnicodeDecodeError:
         try:
-            df = pd.read_csv(filepath, encoding='utf-8-sig', low_memory=False)
+            df = pd.read_csv(filepath, encoding='utf-8-sig', **read_csv_kwargs)
         except UnicodeDecodeError:
-            df = pd.read_csv(filepath, encoding='latin-1', low_memory=False)
+            df = pd.read_csv(filepath, encoding='latin-1', **read_csv_kwargs)
 
     df.columns = df.columns.str.strip()
 
@@ -201,9 +208,10 @@ def load_tiktok_to_db(filepath: str, cursor) -> int:
     if product_col not in df.columns:
         return 0
 
-    df = df[~df[product_col].fillna('').str.lower().apply(
-        lambda x: any(kw.lower() in x for kw in BLACKLIST_KEYWORDS)
-    )]
+    # Fast blacklist filter using vectorized operations
+    product_lower = df[product_col].fillna('').str.lower()
+    mask = ~product_lower.apply(lambda x: any(kw.lower() in x for kw in BLACKLIST_KEYWORDS))
+    df = df[mask]
 
     # Parse dates - Bangkok timezone (data is already in BKK time)
     df['created_at_dt'] = pd.to_datetime(df['Created Time'], format='%d/%m/%Y %H:%M:%S', errors='coerce')
@@ -211,25 +219,36 @@ def load_tiktok_to_db(filepath: str, cursor) -> int:
         df['created_at_dt'] = pd.to_datetime(df['Created Time'], dayfirst=True, errors='coerce')
 
     df = df[df['created_at_dt'].notna()]
+    if df.empty:
+        return 0
+
     df['created_at'] = df['created_at_dt'].dt.strftime('%Y-%m-%dT%H:%M:%S')
     df['date'] = df['created_at_dt'].dt.strftime('%Y-%m-%d')
 
-    # Prepare batch data with correct column mappings
-    batch_data = []
-    for _, row in df.iterrows():
-        batch_data.append((
-            str(row.get('Order ID', '')).strip(),
-            'TikTok',
-            str(row.get('Product Name', '')).strip()[:500],
-            int(pd.to_numeric(row.get('Quantity', 0), errors='coerce') or 0),
-            float(pd.to_numeric(row.get('SKU Subtotal After Discount', 0), errors='coerce') or 0),
-            float(pd.to_numeric(row.get('Order Amount', 0), errors='coerce') or 0),
-            row['created_at'],
-            row['date'],
-            str(row.get('Seller SKU', '')).strip(),
-            str(row.get('Order Status', '')).strip(),
-            str(row.get('Product Category', '')).strip()
-        ))
+    # Vectorized data preparation (much faster than iterrows)
+    df['order_id'] = df['Order ID'].astype(str).str.strip()
+    df['product_name'] = df['Product Name'].astype(str).str.strip().str[:500]
+    df['quantity'] = pd.to_numeric(df['Quantity'], errors='coerce').fillna(0).astype(int)
+    df['subtotal_net'] = pd.to_numeric(df['SKU Subtotal After Discount'], errors='coerce').fillna(0)
+    df['order_total_amount'] = pd.to_numeric(df['Order Amount'], errors='coerce').fillna(0)
+    df['seller_sku'] = df.get('Seller SKU', '').astype(str).str.strip()
+    df['order_status'] = df.get('Order Status', '').astype(str).str.strip()
+    df['product_category'] = df.get('Product Category', '').astype(str).str.strip()
+
+    # Prepare batch data using list comprehension (faster)
+    batch_data = list(zip(
+        df['order_id'],
+        ['TikTok'] * len(df),
+        df['product_name'],
+        df['quantity'],
+        df['subtotal_net'],
+        df['order_total_amount'],
+        df['created_at'],
+        df['date'],
+        df['seller_sku'],
+        df['order_status'],
+        df['product_category']
+    ))
 
     # Batch insert
     if batch_data:
@@ -252,34 +271,45 @@ def load_shopee_to_db(filepath: str, cursor) -> int:
     if product_col not in df.columns:
         return 0
 
-    df = df[~df[product_col].fillna('').str.lower().apply(
-        lambda x: any(kw.lower() in x for kw in BLACKLIST_KEYWORDS)
-    )]
+    # Fast blacklist filter
+    product_lower = df[product_col].fillna('').str.lower()
+    mask = ~product_lower.apply(lambda x: any(kw.lower() in x for kw in BLACKLIST_KEYWORDS))
+    df = df[mask]
 
-    # Parse dates - Bangkok timezone (data is already in BKK time)
+    # Parse dates
     df['created_at_dt'] = pd.to_datetime(df['วันที่ทำการสั่งซื้อ'], errors='coerce')
     if df['created_at_dt'].isna().all():
         df['created_at_dt'] = pd.to_datetime(df['วันที่ทำการสั่งซื้อ'], dayfirst=True, errors='coerce')
 
     df = df[df['created_at_dt'].notna()]
+    if df.empty:
+        return 0
+
     df['created_at'] = df['created_at_dt'].dt.strftime('%Y-%m-%dT%H:%M:%S')
     df['date'] = df['created_at_dt'].dt.strftime('%Y-%m-%d')
 
-    # Prepare batch data with correct column mappings
-    batch_data = []
-    for _, row in df.iterrows():
-        batch_data.append((
-            str(row.get('หมายเลขคำสั่งซื้อ', '')).strip(),
-            'Shopee',
-            str(row.get('ชื่อสินค้า', '')).strip()[:500],
-            int(pd.to_numeric(row.get('จำนวน', 0), errors='coerce') or 0),
-            float(pd.to_numeric(row.get('ราคาขายสุทธิ', 0), errors='coerce') or 0),
-            float(pd.to_numeric(row.get('จำนวนเงินทั้งหมด', 0), errors='coerce') or 0),
-            row['created_at'],
-            row['date'],
-            str(row.get('เลขอ้างอิง SKU (SKU Reference No.)', '')).strip(),
-            str(row.get('สถานะการสั่งซื้อ', '')).strip()
-        ))
+    # Vectorized data preparation
+    df['order_id'] = df['หมายเลขคำสั่งซื้อ'].astype(str).str.strip()
+    df['product_name'] = df['ชื่อสินค้า'].astype(str).str.strip().str[:500]
+    df['quantity'] = pd.to_numeric(df['จำนวน'], errors='coerce').fillna(0).astype(int)
+    df['subtotal_net'] = pd.to_numeric(df['ราคาขายสุทธิ'], errors='coerce').fillna(0)
+    df['order_total_amount'] = pd.to_numeric(df['จำนวนเงินทั้งหมด'], errors='coerce').fillna(0)
+    df['seller_sku'] = df.get('เลขอ้างอิง SKU (SKU Reference No.)', '').astype(str).str.strip()
+    df['order_status'] = df.get('สถานะการสั่งซื้อ', '').astype(str).str.strip()
+
+    # Prepare batch data using list comprehension
+    batch_data = list(zip(
+        df['order_id'],
+        ['Shopee'] * len(df),
+        df['product_name'],
+        df['quantity'],
+        df['subtotal_net'],
+        df['order_total_amount'],
+        df['created_at'],
+        df['date'],
+        df['seller_sku'],
+        df['order_status']
+    ))
 
     # Batch insert
     if batch_data:
@@ -301,6 +331,11 @@ def build_database(show_progress=True) -> bool:
     with get_connection() as conn:
         cursor = conn.cursor()
 
+        # Speed optimizations for bulk insert
+        cursor.execute("PRAGMA journal_mode = OFF")
+        cursor.execute("PRAGMA synchronous = OFF")
+        cursor.execute("PRAGMA cache_size = -64000")  # 64MB cache
+
         # Get already loaded files
         loaded_files = get_loaded_files()
 
@@ -308,12 +343,16 @@ def build_database(show_progress=True) -> bool:
         tiktok_files = sorted(glob.glob(os.path.join(DATA_DIR, TIKTOK_PATTERN)))
         shopee_files = sorted(glob.glob(os.path.join(DATA_DIR, SHOPEE_PATTERN)))
 
+        # Also check for gzip-compressed TikTok files
+        tiktok_files.extend(sorted(glob.glob(os.path.join(DATA_DIR, '*.csv.gz'))))
+
         # Also check cloud data directory
         if os.path.exists(CLOUD_DATA_DIR):
             tiktok_files.extend(sorted(glob.glob(os.path.join(CLOUD_DATA_DIR, TIKTOK_PATTERN))))
             shopee_files.extend(sorted(glob.glob(os.path.join(CLOUD_DATA_DIR, SHOPEE_PATTERN))))
             # Also check for any xlsx/csv files in cloud dir
             tiktok_files.extend(sorted(glob.glob(os.path.join(CLOUD_DATA_DIR, '*.csv'))))
+            tiktok_files.extend(sorted(glob.glob(os.path.join(CLOUD_DATA_DIR, '*.csv.gz'))))
             shopee_files.extend(sorted(glob.glob(os.path.join(CLOUD_DATA_DIR, '*.xlsx'))))
 
         # Filter to only new/modified files
@@ -385,8 +424,9 @@ def refresh_database():
     with get_connection() as conn:
         cursor = conn.cursor()
 
-        # Get all files
+        # Get all files (including gzip-compressed)
         tiktok_files = sorted(glob.glob(os.path.join(DATA_DIR, TIKTOK_PATTERN)))
+        tiktok_files.extend(sorted(glob.glob(os.path.join(DATA_DIR, '*.csv.gz'))))
         shopee_files = sorted(glob.glob(os.path.join(DATA_DIR, SHOPEE_PATTERN)))
 
         loaded_files = get_loaded_files()
@@ -405,7 +445,7 @@ def refresh_database():
             filename = os.path.basename(filepath)
             print(f"[Database] Loading new file: {filename}")
 
-            if filepath.endswith('.csv'):
+            if filepath.endswith('.csv') or filepath.endswith('.csv.gz'):
                 rows = load_tiktok_to_db(filepath, cursor)
             else:
                 rows = load_shopee_to_db(filepath, cursor)
@@ -426,6 +466,7 @@ def refresh_database():
 def get_new_files_count() -> int:
     """Get count of new files not yet loaded."""
     tiktok_files = sorted(glob.glob(os.path.join(DATA_DIR, TIKTOK_PATTERN)))
+    tiktok_files.extend(sorted(glob.glob(os.path.join(DATA_DIR, '*.csv.gz'))))
     shopee_files = sorted(glob.glob(os.path.join(DATA_DIR, SHOPEE_PATTERN)))
 
     loaded_files = get_loaded_files()
@@ -706,7 +747,7 @@ def load_uploaded_file(uploaded_file) -> int:
             tmp_path = tmp.name
 
         try:
-            if filename.endswith('.csv'):
+            if filename.endswith('.csv') or filename.endswith('.csv.gz'):
                 # Check if it's a TikTok file (has Thai characters in pattern)
                 if 'คำสั่งซื้อ' in uploaded_file.name or 'tiktok' in filename:
                     total_rows = load_tiktok_to_db(tmp_path, cursor)
@@ -739,7 +780,7 @@ def load_multiple_uploaded_files(uploaded_files) -> int:
                 tmp_path = tmp.name
 
             try:
-                if filename.endswith('.csv'):
+                if filename.endswith('.csv') or filename.endswith('.csv.gz'):
                     rows = load_tiktok_to_db(tmp_path, cursor)
                 elif filename.endswith('.xlsx'):
                     rows = load_shopee_to_db(tmp_path, cursor)

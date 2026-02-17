@@ -94,7 +94,7 @@ def render_aov_chart(
         )
     )
 
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
 
     # Summary metrics
     max_aov = current_data['aov'].max()

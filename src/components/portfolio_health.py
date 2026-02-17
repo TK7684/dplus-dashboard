@@ -88,7 +88,7 @@ def render_portfolio_health(
     col1, col2 = st.columns([1, 1.5])
 
     with col1:
-        st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(fig, use_container_width=True)
 
     with col2:
         # Risk level with Soft UI styling
@@ -204,4 +204,4 @@ def render_segment_breakdown(
                 display_df['revenue'] = display_df['revenue'].apply(lambda x: f"{x:,.0f}")
                 display_df.columns = ['Product', 'Platform', 'Revenue', 'Qty', 'Orders']
 
-                st.dataframe(display_df, width="stretch", hide_index=True)
+                st.dataframe(display_df, use_container_width=True, hide_index=True)
