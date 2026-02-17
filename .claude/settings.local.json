@@ -1,0 +1,41 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find \"C:\\\\Projects\\\\DPLUS-Dashboard\\\\Original files\" -name \"*.csv\" -exec wc -l {} ;)",
+      "Bash(powershell -Command \"Get-Content ''C:\\\\Projects\\\\DPLUS-Dashboard\\\\Original files\\\\ทั้งหมด คำสั่งซื้อ-2026-02-16-09_00.csv'' -TotalCount 5\")",
+      "Bash(python:*)",
+      "Bash(findstr:*)",
+      "mcp__zread__get_repo_structure",
+      "mcp__zread__read_file",
+      "mcp__zread__search_doc",
+      "Bash(npx @vudovn/ag-kit init:*)",
+      "Bash(iconv:*)",
+      "Bash(PYTHONIOENCODING=utf-8 python:*)",
+      "mcp__zai-mcp-server__analyze_image",
+      "Bash(pip install:*)",
+      "Bash(ls:*)",
+      "Bash(tasklist:*)",
+      "Bash(taskkill /F /IM python.exe)",
+      "Bash(git init:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git config:*)",
+      "Bash(gh auth status)",
+      "Bash(where gh)",
+      "Bash(winget install:*)",
+      "Bash(git remote add:*)",
+      "Bash(git branch:*)",
+      "Bash(git push:*)",
+      "Bash(git pull:*)",
+      "Bash(git reset:*)",
+      "Bash(git reset HEAD:*)",
+      "Bash(find:*)",
+      "Bash(pip show:*)",
+      "Bash(gh repo list:*)",
+      "Bash(git diff:*)",
+      "Bash(git remote set-url:*)",
+      "Bash(git filter-branch --force --index-filter 'git rm --cached --ignore-unmatch \"\"src/data/uploaded/\"\"*.csv \"\"src/data/uploaded/\"\"*.csv.gz' --prune-empty --tag-name-filter cat -- --all)",
+      "Bash(FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch:*)"
+    ]
+  }
+}
