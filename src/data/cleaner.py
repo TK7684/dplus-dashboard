@@ -10,7 +10,8 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import BLACKLIST_KEYWORDS
+# Blacklist keywords - ONLY these (case-insensitive)
+BLACKLIST_KEYWORDS = ['apple', 'iphone', 'ipad']
 
 
 def parse_tiktok_date(date_str: str) -> Optional[pd.Timestamp]:
@@ -127,12 +128,13 @@ def clean_product_names(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def remove_duplicates(df: pd.DataFrame) -> pd.DataFrame:
-    """Remove duplicate rows based on order_id and product_name."""
+    """Remove duplicate rows based on order_id and platform (NOT product_name)."""
     df = df.copy()
 
     # Keep the first occurrence of duplicates
+    # CRITICAL: Deduplicate by order_id + platform only, not product_name
     initial_count = len(df)
-    df = df.drop_duplicates(subset=['order_id', 'product_name', 'platform'], keep='first')
+    df = df.drop_duplicates(subset=['order_id', 'platform'], keep='first')
     final_count = len(df)
 
     if initial_count != final_count:

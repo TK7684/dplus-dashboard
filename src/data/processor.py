@@ -135,7 +135,7 @@ def process_revenue_trends(
 
     # Aggregate revenue by period and platform
     revenue_trends = df.groupby(['period', 'platform']).agg({
-        'order_total_amount': 'sum',
+        'subtotal_net': 'sum',
         'order_id': 'nunique',
         'quantity': 'sum'
     }).reset_index()
@@ -199,11 +199,11 @@ def process_aov_analysis(
 
     # Calculate AOV by period and platform
     aov_data = df.groupby(['period', 'platform']).agg({
-        'order_total_amount': 'sum',
+        'subtotal_net': 'sum',
         'order_id': 'nunique'
     }).reset_index()
 
-    aov_data['aov'] = aov_data['order_total_amount'] / aov_data['order_id']
+    aov_data['aov'] = aov_data['subtotal_net'] / aov_data['order_id']
     aov_data.columns = ['period', 'platform', 'revenue', 'orders', 'aov']
 
     # Calculate segments per platform
@@ -241,33 +241,32 @@ def process_product_matrix(
     if df.empty:
         return pd.DataFrame()
 
-    # Aggregate by product and platform
-    product_data = df.groupby(['product_name', 'platform']).agg({
-        'subtotal_net': 'sum',  # Revenue
-        'quantity': 'sum',      # Volume
-        'order_id': 'nunique'   # Unique orders
-    }).reset_index()
+    # Aggregate by product and platform — use subtotal_net for ALL platforms
+    # (matches BigQuery reference queries which use SAFE_CAST(subtotal_net AS FLOAT64))
+    product_data = df.groupby(['product_name', 'platform']).agg(
+        revenue=('subtotal_net', 'sum'),
+        quantity=('quantity', 'sum'),
+        orders=('order_id', 'nunique')
+    ).reset_index()
 
-    product_data.columns = ['product_name', 'platform', 'revenue', 'quantity', 'orders']
-
-    # Calculate segments per platform
+    # Calculate segments per platform using PERCENT_RANK thresholds from reference queries:
+    # Max (Hero):        revenue_percentile >= 0.8  (top 20%)
+    # Min (Volume/Low):  revenue_percentile <= 0.4  (bottom 40%)
+    # Middle (Core):     everything else             (middle 40%)
     product_data['matrix_segment'] = 'Middle (Core)'
 
-    for platform in product_data['platform'].unique():
-        mask = product_data['platform'] == platform
+    for plat in product_data['platform'].unique():
+        mask = product_data['platform'] == plat
+        plat_revenues = product_data.loc[mask, 'revenue']
 
-        rev_threshold = product_data.loc[mask, 'revenue'].quantile(PRODUCT_REVENUE_TOP_PERCENTILE)
-        qty_median = product_data.loc[mask, 'quantity'].median()
-
-        product_data.loc[mask, 'matrix_segment'] = product_data.loc[mask].apply(
-            lambda row: label_product_segment(
-                row['revenue'],
-                row['quantity'],
-                rev_threshold,
-                qty_median
-            ),
-            axis=1
-        )
+        if len(plat_revenues) > 1:
+            # PERCENT_RANK equivalent: rank each product's revenue
+            ranks = plat_revenues.rank(method='average', pct=True)
+            product_data.loc[mask, 'matrix_segment'] = ranks.apply(
+                lambda r: 'Max (Hero)' if r >= 0.8 else ('Min (Volume)' if r <= 0.4 else 'Middle (Core)')
+            )
+        elif len(plat_revenues) == 1:
+            product_data.loc[mask, 'matrix_segment'] = 'Middle (Core)'
 
     return product_data
 

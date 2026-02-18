@@ -4,10 +4,34 @@ Skincare & Wellness Performance Dashboard with revenue trends, AOV analysis, and
 
 ## Quick Start
 
+### Local Development
+
 ```cmd
 cd C:\Projects\DPLUS-Dashboard
 streamlit run src/app.py
 ```
+
+### Docker Deployment (Recommended for Production)
+
+**Quick Deploy (Linux/Mac):**
+```bash
+chmod +x deploy.sh
+./deploy.sh
+```
+
+**Quick Deploy (Windows PowerShell):**
+```powershell
+.\deploy.ps1
+```
+
+**Manual Docker:**
+```bash
+docker compose up -d
+```
+
+Access at: `http://localhost:8501`
+
+📖 **See [DEPLOYMENT.md](DEPLOYMENT.md)** for detailed deployment guides for VPS, Oracle Cloud, AWS, and more.
 
 ## Data Files
 

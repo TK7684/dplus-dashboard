@@ -1,0 +1,82 @@
+# DPLUS Dashboard - Docker Ignore
+# Excludes unnecessary files from Docker build context
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info
+dist
+build
+.pytest_cache
+.coverage
+htmlcov
+.tox
+.mypy_cache
+.pyre
+.pytype
+.dmypy.json
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Data files (will be mounted as volume or uploaded)
+data/original/
+data/*.db
+data/*.duckdb
+!data/.gitkeep
+
+# Uploaded files
+src/data/uploaded/*
+!src/data/uploaded/.gitkeep
+
+# Documentation
+*.md
+!README.md
+docs/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.travis.yml
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Other
+.flake8
+.env
+.env.*

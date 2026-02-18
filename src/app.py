@@ -59,11 +59,13 @@ from data.database import (
     load_multiple_uploaded_files
 )
 from data.time_utils import format_period_label, calculate_change
+from data.file_monitor import get_monitor, check_for_new_data
 from components.sidebar import render_sidebar
 from components.revenue_chart import render_revenue_chart, calculate_revenue_segments
 from components.aov_chart import render_aov_chart
 from components.product_matrix import render_product_matrix
 from components.portfolio_health import render_portfolio_health, render_segment_breakdown
+from components.top3_metrics import render_top3_metrics
 
 
 def setup_page():
@@ -605,6 +607,10 @@ def main():
         st.session_state.last_refresh = time.time()
     if 'auto_refresh' not in st.session_state:
         st.session_state.auto_refresh = True
+    if 'data_changed' not in st.session_state:
+        st.session_state.data_changed = False
+    if 'monitor_initialized' not in st.session_state:
+        st.session_state.monitor_initialized = False
 
     # Clear cache on first load to ensure fresh data
     if 'cache_cleared' not in st.session_state:
@@ -614,6 +620,24 @@ def main():
     # Build/refresh database - DuckDB queries files directly
     with st.spinner("Loading..."):
         build_database(show_progress=False)
+
+    # Initialize file monitor on first load
+    if not st.session_state.monitor_initialized:
+        try:
+            monitor = get_monitor()
+            # Initial hash calculation
+            monitor.check_for_changes()
+            st.session_state.monitor_initialized = True
+        except Exception as e:
+            print(f"File monitor initialization error: {e}")
+
+    # Check for new data files (when auto-refresh is enabled)
+    if st.session_state.auto_refresh:
+        try:
+            if check_for_new_data():
+                st.session_state.data_changed = True
+        except Exception as e:
+            print(f"Error checking for new data: {e}")
 
     # Check if database is empty and show uploader
     if is_database_empty():
@@ -677,6 +701,7 @@ def main():
         if st.button("Refresh Data", key="refresh_btn"):
             with st.spinner("Refreshing..."):
                 rows = refresh_database()
+                st.session_state.data_changed = False  # Clear the flag
                 if rows > 0:
                     st.success(f"Loaded {rows:,} new records!")
                     st.rerun()
@@ -687,8 +712,11 @@ def main():
         auto_refresh = st.checkbox("Auto-refresh", value=st.session_state.auto_refresh, key="auto_refresh_check")
         st.session_state.auto_refresh = auto_refresh
 
-    # Show new files indicator
-    if new_files > 0:
+    # Show new files/data indicator
+    if st.session_state.data_changed:
+        st.toast("New data files detected! Click 'Refresh Data' to update.", icon="📊")
+        st.info("New data files detected! Click 'Refresh Data' above to update the dashboard.")
+    elif new_files > 0:
         st.info(f" {new_files} new file(s) detected. Click 'Refresh Data' to load.")
 
     min_date, max_date = query_date_range()
@@ -724,8 +752,61 @@ def main():
         prev_products = None
         previous_metrics = None
 
+    # Platform selection at the top of the page
+    st.markdown(f"""
+    <div style="
+        background: linear-gradient(135deg, rgba(74, 124, 111, 0.08) 0%, rgba(96, 165, 250, 0.08) 100%);
+        border: 1px solid rgba(74, 124, 111, 0.2);
+        border-radius: 16px;
+        padding: 1.5rem;
+        margin-bottom: 1.5rem;
+    ">
+        <h3 style="
+            color: {COLORS['Primary']};
+            font-size: 1.1rem;
+            font-weight: 700;
+            margin: 0 0 1rem 0;
+        ">
+            Platform Selection
+        </h3>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Platform selector at the top
+    selected_platform = st.radio(
+        "Select Platform",
+        options=['All', 'TikTok', 'Shopee'],
+        index=0,
+        horizontal=True,
+        key='top_platform_selector',
+        label_visibility="collapsed"
+    )
+    
+    # Update platform filter if changed
+    if selected_platform != platform:
+        platform = selected_platform
+        # Re-query data with new platform
+        with st.spinner("Loading data..."):
+            revenue_data = query_revenue_by_period(start_date, end_date, granularity, platform)
+            aov_data = query_aov_by_period(start_date, end_date, granularity, platform)
+            product_data = query_product_stats(start_date, end_date, platform)
+            current_metrics = query_summary_metrics(start_date, end_date, platform)
+            revenue_data = calculate_revenue_segments(revenue_data)
+        
+        if show_comparison:
+            prev_revenue = query_revenue_by_period(compare_start, compare_end, granularity, platform)
+            prev_aov = query_aov_by_period(compare_start, compare_end, granularity, platform)
+            prev_products = query_product_stats(compare_start, compare_end, platform)
+            previous_metrics = query_summary_metrics(compare_start, compare_end, platform)
+            prev_revenue = calculate_revenue_segments(prev_revenue)
+    
     render_period_info(filters)
     render_kpi_header(current_metrics, previous_metrics, show_comparison)
+
+    st.markdown("---")
+
+    # Top 3 Metrics Section
+    render_top3_metrics(start_date, end_date, platform, title="Top 3 Insights")
 
     st.markdown("---")
 
@@ -752,6 +833,8 @@ def main():
     with col4:
         st.markdown('<div class="section-header">Portfolio Health</div>', unsafe_allow_html=True)
         render_portfolio_health(product_data, prev_products, show_comparison)
+
+    st.markdown("---")
 
     # Product breakdown
     st.markdown("---")

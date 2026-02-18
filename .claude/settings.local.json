@@ -37,7 +37,11 @@
       "Bash(git filter-branch --force --index-filter 'git rm --cached --ignore-unmatch \"\"src/data/uploaded/\"\"*.csv \"\"src/data/uploaded/\"\"*.csv.gz' --prune-empty --tag-name-filter cat -- --all)",
       "Bash(FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch:*)",
       "Bash(git rm:*)",
-      "Bash(git remote:*)"
+      "Bash(git remote:*)",
+      "Bash(taskkill:*)",
+      "Bash(curl:*)",
+      "Bash(dir:*)",
+      "Bash(wc:*)"
     ]
   }
 }

@@ -1,12 +1,13 @@
 """
 File monitor for auto-refreshing data when new files are added.
+Watches BOTH 'Original files' and 'data' directories.
 """
 
 import os
 import time
 import threading
 import hashlib
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import sys
@@ -14,6 +15,15 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import DATA_DIR
+
+# Project root for resolving both data directories
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# All directories that contain data files
+ALL_DATA_DIRS = [
+    os.path.join(_PROJECT_ROOT, 'Original files'),
+    os.path.join(_PROJECT_ROOT, 'data'),
+]
 
 
 class DataFileHandler(FileSystemEventHandler):
@@ -31,15 +41,15 @@ class DataFileHandler(FileSystemEventHandler):
         """Check if file matches our data patterns."""
         filename = os.path.basename(filepath)
 
-        # Check TikTok pattern (CSV files)
-        if filename.endswith('.csv') and 'คำสั่งซื้อ' in filename:
+        # Check TikTok pattern (CSV files) - any CSV is a potential data file
+        if filename.endswith('.csv') or filename.endswith('.csv.gz'):
             return True
 
         # Check Shopee pattern (Excel files)
-        if filename.endswith('.xlsx') and filename.startswith('Order.all.'):
+        if filename.endswith('.xlsx'):
             return True
 
-        # Also check temp files that might be completed
+        # Ignore temp files
         if filename.endswith('.tmp') or filename.endswith('.crdownload'):
             return False
 
@@ -88,10 +98,20 @@ class DataFileHandler(FileSystemEventHandler):
 
 
 class DataMonitor:
-    """Monitor for watching data directory changes."""
+    """Monitor for watching multiple data directories for changes."""
 
-    def __init__(self, data_dir: str = None, refresh_callback: Callable = None):
-        self.data_dir = data_dir or DATA_DIR
+    def __init__(self, data_dirs: List[str] = None, refresh_callback: Callable = None):
+        # Support multiple directories; fall back to both standard dirs
+        if data_dirs is None:
+            self.data_dirs = [d for d in ALL_DATA_DIRS]
+        elif isinstance(data_dirs, str):
+            self.data_dirs = [data_dirs]
+        else:
+            self.data_dirs = list(data_dirs)
+
+        # Backward-compat single-dir attribute
+        self.data_dir = self.data_dirs[0] if self.data_dirs else DATA_DIR
+
         self.refresh_callback = refresh_callback
         self.observer: Optional[Observer] = None
         self.handler: Optional[DataFileHandler] = None
@@ -99,36 +119,42 @@ class DataMonitor:
         self._file_hashes: dict = {}
 
     def _calculate_file_hash(self) -> dict:
-        """Calculate hashes of all data files to detect changes."""
+        """Calculate hashes of all data files across ALL watched directories."""
         hashes = {}
 
-        if not os.path.exists(self.data_dir):
-            return hashes
+        for data_dir in self.data_dirs:
+            if not os.path.exists(data_dir):
+                continue
 
-        for filename in os.listdir(self.data_dir):
-            filepath = os.path.join(self.data_dir, filename)
+            for filename in os.listdir(data_dir):
+                filepath = os.path.join(data_dir, filename)
 
-            # Check if it's a data file
-            if filename.endswith('.csv') or filename.endswith('.xlsx'):
-                try:
-                    with open(filepath, 'rb') as f:
-                        # Read first and last 1MB for large files
-                        f.seek(0, 2)
-                        size = f.tell()
+                if not os.path.isfile(filepath):
+                    continue
 
-                        f.seek(0)
-                        header = f.read(1024 * 1024)  # First 1MB
+                # Check if it's a data file
+                if filename.endswith('.csv') or filename.endswith('.csv.gz') or filename.endswith('.xlsx'):
+                    try:
+                        with open(filepath, 'rb') as f:
+                            # Read first and last 1MB for large files
+                            f.seek(0, 2)
+                            size = f.tell()
 
-                        if size > 2 * 1024 * 1024:
-                            f.seek(-1024 * 1024, 2)
-                            footer = f.read(1024 * 1024)  # Last 1MB
-                        else:
-                            footer = b''
+                            f.seek(0)
+                            header = f.read(1024 * 1024)  # First 1MB
 
-                        file_hash = hashlib.md5(header + footer).hexdigest()
-                        hashes[filename] = {'hash': file_hash, 'size': size}
-                except Exception as e:
-                    print(f"[Monitor] Error hashing {filename}: {e}")
+                            if size > 2 * 1024 * 1024:
+                                f.seek(-1024 * 1024, 2)
+                                footer = f.read(1024 * 1024)  # Last 1MB
+                            else:
+                                footer = b''
+
+                            file_hash = hashlib.md5(header + footer).hexdigest()
+                            # Use full path as key so same filename in different dirs are tracked separately
+                            key = os.path.join(data_dir, filename)
+                            hashes[key] = {'hash': file_hash, 'size': size}
+                    except Exception as e:
+                        print(f"[Monitor] Error hashing {filename}: {e}")
 
         return hashes
 
@@ -143,28 +169,25 @@ class DataMonitor:
         # Check for new files
         new_files = set(current_hashes.keys()) - set(self._file_hashes.keys())
         if new_files:
-            print(f"[Monitor] New files detected: {new_files}")
+            new_names = [os.path.basename(f) for f in new_files]
+            print(f"[Monitor] New files detected: {new_names}")
             self._file_hashes = current_hashes
             return True
 
         # Check for modified files (size or hash change)
-        for filename, info in current_hashes.items():
-            old_info = self._file_hashes.get(filename)
+        for filepath, info in current_hashes.items():
+            old_info = self._file_hashes.get(filepath)
             if old_info:
                 if old_info['size'] != info['size'] or old_info['hash'] != info['hash']:
-                    print(f"[Monitor] Modified file detected: {filename}")
+                    print(f"[Monitor] Modified file detected: {os.path.basename(filepath)}")
                     self._file_hashes = current_hashes
                     return True
 
         return False
 
     def start_watching(self):
-        """Start watching the data directory for changes."""
+        """Start watching ALL data directories for changes."""
         if self._running:
-            return
-
-        if not os.path.exists(self.data_dir):
-            print(f"[Monitor] Data directory not found: {self.data_dir}")
             return
 
         self.handler = DataFileHandler(
@@ -173,14 +196,25 @@ class DataMonitor:
         )
 
         self.observer = Observer()
-        self.observer.schedule(self.handler, self.data_dir, recursive=False)
+        watched_count = 0
+
+        for data_dir in self.data_dirs:
+            if os.path.exists(data_dir):
+                self.observer.schedule(self.handler, data_dir, recursive=False)
+                print(f"[Monitor] Watching directory: {data_dir}")
+                watched_count += 1
+            else:
+                print(f"[Monitor] Directory not found (will not watch): {data_dir}")
+
+        if watched_count == 0:
+            print("[Monitor] No valid directories to watch")
+            return
+
         self.observer.start()
         self._running = True
 
-        print(f"[Monitor] Watching directory: {self.data_dir}")
-
     def stop_watching(self):
-        """Stop watching the data directory."""
+        """Stop watching all directories."""
         if self.observer and self._running:
             self.observer.stop()
             self.observer.join()
@@ -197,7 +231,7 @@ _monitor: Optional[DataMonitor] = None
 
 
 def get_monitor() -> DataMonitor:
-    """Get or create the global monitor instance."""
+    """Get or create the global monitor instance watching all data directories."""
     global _monitor
     if _monitor is None:
         _monitor = DataMonitor()
@@ -205,7 +239,7 @@ def get_monitor() -> DataMonitor:
 
 
 def start_monitoring(refresh_callback: Callable):
-    """Start monitoring with the given refresh callback."""
+    """Start monitoring all data directories with the given refresh callback."""
     global _monitor
     _monitor = DataMonitor(refresh_callback=refresh_callback)
     _monitor.start_watching()
@@ -220,6 +254,6 @@ def stop_monitoring():
 
 
 def check_for_new_data() -> bool:
-    """Check if new data files have been added."""
+    """Check if new data files have been added to any watched directory."""
     monitor = get_monitor()
     return monitor.check_for_changes()

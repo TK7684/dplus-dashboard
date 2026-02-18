@@ -1,0 +1,60 @@
+# DPLUS Dashboard - Docker Compose Configuration
+# For easy deployment on VPS, Oracle Cloud, home server, or local development
+
+version: '3.8'
+
+services:
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dplus-dashboard
+    restart: unless-stopped
+    ports:
+      - "${DASHBOARD_PORT:-8501}:8501"
+    environment:
+      # Streamlit Configuration
+      - STREAMLIT_SERVER_HEADLESS=true
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
+      - STREAMLIT_LOGGER_LEVEL=info
+      - STREAMLIT_SERVER_ENABLE_CORS=false
+      - STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION=false
+      # Optional: Set custom password via environment variable
+      # - APP_PASSWORD=${APP_PASSWORD:-dplus2024}
+    volumes:
+      # Persist DuckDB database
+      - ./data:/app/data
+      # Optional: Mount local data files directory
+      # - ./data/original:/app/data/original:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      - "com.dplus.description=DPLUS Skin Analytics Dashboard"
+      - "com.dplus.service=dashboard"
+
+  # Optional: Nginx reverse proxy for production
+  # Uncomment and configure for production use with SSL
+  # nginx:
+  #   image: nginx:alpine
+  #   container_name: dplus-nginx
+  #   restart: unless-stopped
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+  #     - ./nginx/ssl:/etc/nginx/ssl:ro
+  #   depends_on:
+  #     - dashboard
+  #   networks:
+  #     - dplus-network
+
+# Optional: Define network for multi-container setups
+# networks:
+#   dplus-network:
+#     driver: bridge
